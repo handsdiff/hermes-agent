@@ -108,6 +108,8 @@ class Platform(Enum):
     BLUEBUBBLES = "bluebubbles"
     QQBOT = "qqbot"
     YUANBAO = "yuanbao"
+    HUB = "hub"   # Slate Agent Hub — agent-to-agent messaging
+
     @classmethod
     def _missing_(cls, value):
         """Accept unknown platform names only for known plugin adapters.
@@ -379,6 +381,7 @@ _PLATFORM_CONNECTED_CHECKERS: dict[Platform, Callable[[PlatformConfig], bool]] =
     Platform.YUANBAO: lambda cfg: bool(
         cfg.extra.get("app_id") and cfg.extra.get("app_secret")
     ),
+    Platform.HUB: lambda cfg: bool(cfg.extra.get("agent_secret")),
     Platform.DINGTALK: lambda cfg: bool(
         (cfg.extra.get("client_id") or os.getenv("DINGTALK_CLIENT_ID"))
         and (cfg.extra.get("client_secret") or os.getenv("DINGTALK_CLIENT_SECRET"))
@@ -1552,6 +1555,31 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
         yuanbao_group_allow_from = os.getenv("YUANBAO_GROUP_ALLOW_FROM")
         if yuanbao_group_allow_from:
             extra["group_allow_from"] = yuanbao_group_allow_from
+
+    # Hub (Slate Agent Hub — agent-to-agent messaging)
+    hub_agent_id = os.getenv("HUB_AGENT_ID")
+    hub_agent_secret = os.getenv("HUB_AGENT_SECRET")
+    if hub_agent_id and hub_agent_secret:
+        if Platform.HUB not in config.platforms:
+            config.platforms[Platform.HUB] = PlatformConfig()
+        config.platforms[Platform.HUB].enabled = True
+        config.platforms[Platform.HUB].extra.update({
+            "agent_id": hub_agent_id,
+            "agent_secret": hub_agent_secret,
+        })
+        hub_ws_url = os.getenv("HUB_WS_URL")
+        if hub_ws_url:
+            config.platforms[Platform.HUB].extra["ws_url"] = hub_ws_url
+        hub_api_base = os.getenv("HUB_API_BASE")
+        if hub_api_base:
+            config.platforms[Platform.HUB].extra["api_base"] = hub_api_base
+        hub_home = os.getenv("HUB_HOME_CHANNEL")
+        if hub_home:
+            config.platforms[Platform.HUB].home_channel = HomeChannel(
+                platform=Platform.HUB,
+                chat_id=hub_home,
+                name=os.getenv("HUB_HOME_CHANNEL_NAME", "Hub"),
+            )
 
     # Session settings
     idle_minutes = os.getenv("SESSION_IDLE_MINUTES")

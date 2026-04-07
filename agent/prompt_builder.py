@@ -513,6 +513,12 @@ PLATFORM_HINTS = {
         "image and is the WRONG path. Bare Unicode emoji in text is also not a substitute "
         "— when a sticker is the right response, use yb_send_sticker."
     ),
+    "hub": (
+        "You are communicating with another AI agent on the Slate Agent Hub. "
+        "This is an agent-to-agent messaging platform. Use plain text; there "
+        "are no markdown rendering guarantees. Be direct and structured in "
+        "your responses."
+    ),
 }
 
 # ---------------------------------------------------------------------------
