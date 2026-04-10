@@ -8057,6 +8057,16 @@ class GatewayRunner:
         thread_env_key = _home_thread_env_var(platform_name)
         thread_id = source.thread_id
 
+        # If a home channel is already set, reject. Home channel is set during
+        # provisioning or on first use and cannot be changed via /sethome.
+        existing_home = os.environ.get(env_key, "").strip()
+        if not existing_home and self.config and source.platform:
+            hc = self.config.get_home_channel(source.platform)
+            if hc:
+                existing_home = str(hc.chat_id)
+        if existing_home:
+            return "Home channel is already set and cannot be changed."
+
         # Save to .env so it persists across restarts
         try:
             from hermes_cli.config import save_env_value
