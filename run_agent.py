@@ -1653,6 +1653,11 @@ class AIAgent:
         
         # Cached system prompt -- built once per session, only rebuilt on compression
         self._cached_system_prompt: Optional[str] = None
+
+        # Notifications from the background review thread (skill/memory creates).
+        # Drained at the top of the next run_conversation() call and injected as
+        # [System: ...] messages so the LLM knows what happened.
+        self._pending_bg_notifications: List[str] = []
         
         # Filesystem checkpoint manager (transparent — not a tool)
         from tools.checkpoint_manager import CheckpointManager
@@ -3555,6 +3560,54 @@ class AIAgent:
                 actions.append(f"{label} updated")
         return actions
 
+    @staticmethod
+    def _summarize_background_review_skill_notifications(
+        review_messages: List[Dict],
+        prior_snapshot: List[Dict],
+    ) -> List[tuple[str, str]]:
+        """Collect new skill-creation notifications from a background review.
+
+        Mirrors ``_summarize_background_review_actions`` stale-message filtering
+        so a review agent inheriting prior history does not notify the main
+        agent about skills created in an earlier turn.
+        """
+        existing_tool_call_ids = set()
+        existing_tool_contents = set()
+        for prior in prior_snapshot or []:
+            if not isinstance(prior, dict) or prior.get("role") != "tool":
+                continue
+            tcid = prior.get("tool_call_id")
+            if tcid:
+                existing_tool_call_ids.add(tcid)
+            else:
+                content = prior.get("content")
+                if isinstance(content, str):
+                    existing_tool_contents.add(content)
+
+        notifications: List[tuple[str, str]] = []
+        for msg in review_messages or []:
+            if not isinstance(msg, dict) or msg.get("role") != "tool":
+                continue
+            tcid = msg.get("tool_call_id")
+            if tcid and tcid in existing_tool_call_ids:
+                continue
+            if not tcid:
+                content_str = msg.get("content")
+                if isinstance(content_str, str) and content_str in existing_tool_contents:
+                    continue
+            try:
+                data = json.loads(msg.get("content", "{}"))
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(data, dict) or not data.get("success"):
+                continue
+            message = data.get("message", "")
+            if "created" not in message.lower():
+                continue
+            skill_path = data.get("path") or data.get("skill_md") or ""
+            notifications.append((message, skill_path))
+        return notifications
+
     def _spawn_background_review(
         self,
         messages_snapshot: List[Dict],
@@ -3645,6 +3698,10 @@ class AIAgent:
                     getattr(review_agent, "_session_messages", []),
                     messages_snapshot,
                 )
+                skill_notifications = self._summarize_background_review_skill_notifications(
+                    getattr(review_agent, "_session_messages", []),
+                    messages_snapshot,
+                )
 
                 if actions:
                     summary = " · ".join(dict.fromkeys(actions))
@@ -3656,6 +3713,32 @@ class AIAgent:
                         try:
                             _bg_cb(
                                 f"💾 Self-improvement review: {summary}"
+                            )
+                        except Exception:
+                            pass
+
+                # Notify the main agent about skill creations so the LLM
+                # can respond when the user asks about them.
+                if skill_notifications:
+                    for msg_text, path in skill_notifications:
+                        note = msg_text
+                        if path:
+                            note += f" Path: {path}. Use skill_view to read it."
+                        # list.append is GIL-atomic — safe from background thread
+                        self._pending_bg_notifications.append(note)
+
+                    # Invalidate the main agent's cached system prompt so the
+                    # skills index rebuilds on the next turn.
+                    # Attribute assignment is GIL-atomic — safe from background thread.
+                    self._cached_system_prompt = None
+
+                    # Also clear the DB-stored prompt so the gateway path
+                    # (which loads from the session DB, not the instance cache)
+                    # rebuilds fresh on the next turn.
+                    if self._session_db:
+                        try:
+                            self._session_db.update_system_prompt(
+                                self.session_id, None
                             )
                         except Exception:
                             pass
@@ -10532,6 +10615,14 @@ class AIAgent:
             if self._turns_since_memory >= self._memory_nudge_interval:
                 _should_review_memory = True
                 self._turns_since_memory = 0
+
+        # Drain any pending notifications from the background review thread.
+        # These appear before the user's new message so the LLM knows about
+        # skill/memory creates that happened between turns.
+        if self._pending_bg_notifications:
+            for _bg_note in self._pending_bg_notifications:
+                messages.append({"role": "user", "content": f"[System: {_bg_note}]"})
+            self._pending_bg_notifications.clear()
 
         # Add user message
         user_msg = {"role": "user", "content": user_message}
