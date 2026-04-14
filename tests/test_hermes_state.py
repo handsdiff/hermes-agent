@@ -1844,7 +1844,10 @@ class TestListSessionsRich:
             )
             db._conn.commit()
 
-        assert [s["id"] for s in db.list_sessions_rich(limit=5)] == ["new", "old"]
+        assert [s["id"] for s in db.list_sessions_rich(limit=5)] == ["old", "new"]
+        assert [
+            s["id"] for s in db.list_sessions_rich(limit=5, order_by_last_active=False)
+        ] == ["new", "old"]
         assert [
             s["id"] for s in db.list_sessions_rich(limit=5, order_by_last_active=True)
         ] == ["old", "new"]
@@ -2672,4 +2675,3 @@ class TestFTS5ToolCallMigration:
             assert version == 11
         finally:
             session_db.close()
-

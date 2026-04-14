@@ -956,7 +956,7 @@ class SessionDB:
         offset: int = 0,
         include_children: bool = False,
         project_compression_tips: bool = True,
-        order_by_last_active: bool = False,
+        order_by_last_active: bool = True,
     ) -> List[Dict[str, Any]]:
         """List sessions with preview (first user message) and last active timestamp.
 
@@ -977,8 +977,9 @@ class SessionDB:
         delegate subagents and branches hidden. Pass ``False`` to return the
         raw root rows (useful for admin/debug UIs).
 
-        Pass ``order_by_last_active=True`` to sort by most-recent activity
-        instead of original conversation start time. For compression chains,
+        By default, sessions sort by most-recent activity instead of original
+        conversation start time. Set ``order_by_last_active=False`` to sort by
+        original start time. For compression chains,
         the "most-recent activity" is taken from the live tip (not the root),
         so an old conversation that was compressed and continued recently
         surfaces in the correct slot. Ordering is computed at SQL level via
@@ -2245,4 +2246,3 @@ class SessionDB:
             result["error"] = str(exc)
 
         return result
-
