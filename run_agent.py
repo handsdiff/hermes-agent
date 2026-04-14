@@ -596,6 +596,7 @@ class AIAgent:
         platform: str = None,
         user_id: str = None,
         gateway_session_key: str = None,
+        legacy_peer_ids: list[str] = None,
         skip_context_files: bool = False,
         skip_memory: bool = False,
         session_db=None,
@@ -665,6 +666,7 @@ class AIAgent:
         self.platform = platform  # "cli", "telegram", "discord", "whatsapp", etc.
         self._user_id = user_id  # Platform user identifier (gateway sessions)
         self._gateway_session_key = gateway_session_key  # Stable per-chat key (e.g. agent:main:telegram:dm:123)
+        self._legacy_peer_ids = legacy_peer_ids or []  # Historical transport-level peer IDs for owner dual-read
         # Pluggable print function — CLI replaces this with _cprint so that
         # raw ANSI status lines are routed through prompt_toolkit's renderer
         # instead of going directly to stdout where patch_stdout's StdoutProxy
@@ -1288,6 +1290,8 @@ class AIAgent:
                         # Thread gateway session key for stable per-chat Honcho session isolation
                         if self._gateway_session_key:
                             _init_kwargs["gateway_session_key"] = self._gateway_session_key
+                        if self._legacy_peer_ids:
+                            _init_kwargs["legacy_peer_ids"] = self._legacy_peer_ids
                         # Profile identity for per-profile provider scoping
                         try:
                             from hermes_cli.profiles import get_active_profile_name

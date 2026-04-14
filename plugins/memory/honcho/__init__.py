@@ -285,6 +285,7 @@ class HonchoMemoryProvider(MemoryProvider):
                 cfg.peer_name = _gw_user_id
 
             self._config = cfg
+            self._legacy_peer_ids = kwargs.get("legacy_peer_ids") or []
 
             # ----- B1: recall_mode from config -----
             self._recall_mode = cfg.recall_mode  # "context", "tools", or "hybrid"
@@ -427,6 +428,12 @@ class HonchoMemoryProvider(MemoryProvider):
         if rep:
             parts.append(f"## User Representation\n{rep}")
 
+        # Legacy representations from pre-unification transport-level peers.
+        # Merged alongside the primary so the model sees full owner history.
+        legacy = ctx.get("legacy_representations", "")
+        if legacy:
+            parts.append(f"## Prior Channel History\n{legacy}")
+
         card = ctx.get("card", "")
         if card:
             parts.append(f"## User Peer Card\n{card}")
@@ -518,7 +525,10 @@ class HonchoMemoryProvider(MemoryProvider):
             if self._base_context_cache is None:
                 # First call — synchronous fetch
                 try:
-                    ctx = self._manager.get_prefetch_context(self._session_key)
+                    ctx = self._manager.get_prefetch_context(
+                        self._session_key,
+                        legacy_peer_ids=self._legacy_peer_ids,
+                    )
                     self._base_context_cache = self._format_first_turn_context(ctx) if ctx else ""
                     self._last_context_turn = self._turn_count
                 except Exception as e:
