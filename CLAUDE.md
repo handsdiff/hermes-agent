@@ -9,7 +9,7 @@ This is the `handsdiff/hermes-agent` fork of `NousResearch/hermes-agent`.
 
 ## Open PRs to upstream
 
-6 open PRs, all targeting `NousResearch/hermes-agent` main:
+7 open PRs, all targeting `NousResearch/hermes-agent` main:
 
 | PR | Branch | What | Depends on |
 |----|--------|------|------------|
@@ -19,6 +19,7 @@ This is the `handsdiff/hermes-agent` fork of `NousResearch/hermes-agent`.
 | #7297 | `feat/per-platform-model` | Per-platform model overrides via config.yaml | — |
 | #9287 | `feat/cron-memory-peers` | Per-job Honcho peers for cron (+ revert #6995 guard) | — |
 | #9308 | `feat/user-unify` | Unify owner identity across channels in Honcho memory | #9287 |
+| #9829 | `fix/bg-skill-notify` | Notify main agent when background review creates skills | — |
 
 Merged: #6851 (telegram custom base_url). The `telegram-base-url-upstream` branch can be deleted as cleanup.
 
@@ -52,6 +53,7 @@ When upstream `main` moves:
    git checkout fix/lock-sethome-after-first-use && git rebase upstream/main
    git checkout feat/per-platform-model && git rebase upstream/main
    git checkout feat/cron-memory-peers && git rebase upstream/main
+   git checkout fix/bg-skill-notify && git rebase upstream/main
    git checkout fork-only && git rebase upstream/main
    ```
 3. Rebase stacked branches onto their parent (not upstream/main):
@@ -63,7 +65,7 @@ When upstream `main` moves:
    ```
    git checkout main
    git reset --hard upstream/main
-   git merge hub-adapter feat/multi-memory-provider fix/lock-sethome-after-first-use feat/per-platform-model feat/cron-memory-peers feat/user-unify fork-only
+   git merge hub-adapter feat/multi-memory-provider fix/lock-sethome-after-first-use feat/per-platform-model feat/cron-memory-peers feat/user-unify fix/bg-skill-notify fork-only
    ```
 6. Force-push fork main.
 
@@ -113,6 +115,12 @@ after upstream dead-code sweep deleted it. Branch depends on it in `run_agent.py
 
 **#5957 (hub-adapter):** Fixed pre-existing test bug where `tests/gateway/test_hub.py`
 patched the old `websockets.client.connect` symbol after upstream switched to `websockets.connect`.
+
+**#9829 (bg-skill-notify):** Adds `_pending_bg_notifications` queue to `AIAgent`,
+populated from the background review thread when skills are created. Drained at the
+start of `run_conversation()` as `[System: ...]` messages. Also invalidates
+`_cached_system_prompt` and the DB-stored prompt. If upstream refactors
+`_spawn_background_review` or the scan loop at ~line 2233, this branch will conflict.
 
 ## Fork-only changes
 
