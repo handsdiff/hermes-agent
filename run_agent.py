@@ -596,6 +596,7 @@ class AIAgent:
         platform: str = None,
         user_id: str = None,
         gateway_session_key: str = None,
+        legacy_peer_ids: list[str] = None,
         skip_context_files: bool = False,
         skip_memory: bool = False,
         session_db=None,
@@ -665,6 +666,7 @@ class AIAgent:
         self.platform = platform  # "cli", "telegram", "discord", "whatsapp", etc.
         self._user_id = user_id  # Platform user identifier (gateway sessions)
         self._gateway_session_key = gateway_session_key  # Stable per-chat key (e.g. agent:main:telegram:dm:123)
+        self._legacy_peer_ids = legacy_peer_ids or []  # Historical transport-level peer IDs for owner dual-read
         # Pluggable print function — CLI replaces this with _cprint so that
         # raw ANSI status lines are routed through prompt_toolkit's renderer
         # instead of going directly to stdout where patch_stdout's StdoutProxy
@@ -1151,6 +1153,11 @@ class AIAgent:
         
         # Cached system prompt -- built once per session, only rebuilt on compression
         self._cached_system_prompt: Optional[str] = None
+
+        # Notifications from the background review thread (skill/memory creates).
+        # Drained at the top of the next run_conversation() call and injected as
+        # [System: ...] messages so the LLM knows what happened.
+        self._pending_bg_notifications: List[str] = []
         
         # Filesystem checkpoint manager (transparent — not a tool)
         from tools.checkpoint_manager import CheckpointManager
@@ -1226,29 +1233,34 @@ class AIAgent:
         
 
 
-        # Memory provider plugin (external — one at a time, alongside built-in)
-        # Reads memory.provider from config to select which plugin to activate.
+        # Memory provider plugins (external — one or more, alongside built-in)
+        # Reads memory.providers list from config to select which plugins to activate.
         self._memory_manager = None
         if not skip_memory:
             try:
-                _mem_provider_name = mem_config.get("provider", "") if mem_config else ""
+                # Read providers list; fall back to legacy single-string field
+                _mem_provider_names = (mem_config.get("providers", []) or []) if mem_config else []
+                if not _mem_provider_names and mem_config:
+                    _legacy = mem_config.get("provider", "")
+                    if _legacy:
+                        _mem_provider_names = [_legacy]
 
                 # Auto-migrate: if Honcho was actively configured (enabled +
-                # credentials) but memory.provider is not set, activate the
+                # credentials) but memory.providers is not set, activate the
                 # honcho plugin automatically.  Just having the config file
                 # is not enough — the user may have disabled Honcho or the
                 # file may be from a different tool.
-                if not _mem_provider_name:
+                if not _mem_provider_names:
                     try:
                         from plugins.memory.honcho.client import HonchoClientConfig as _HCC
                         _hcfg = _HCC.from_global_config()
                         if _hcfg.enabled and (_hcfg.api_key or _hcfg.base_url):
-                            _mem_provider_name = "honcho"
+                            _mem_provider_names = ["honcho"]
                             # Persist so this only auto-migrates once
                             try:
                                 from hermes_cli.config import load_config as _lc, save_config as _sc
                                 _cfg = _lc()
-                                _cfg.setdefault("memory", {})["provider"] = "honcho"
+                                _cfg.setdefault("memory", {})["providers"] = ["honcho"]
                                 _sc(_cfg)
                             except Exception:
                                 pass
@@ -1258,13 +1270,16 @@ class AIAgent:
                     except Exception:
                         pass
 
-                if _mem_provider_name:
+                if _mem_provider_names:
                     from agent.memory_manager import MemoryManager as _MemoryManager
                     from plugins.memory import load_memory_provider as _load_mem
                     self._memory_manager = _MemoryManager()
-                    _mp = _load_mem(_mem_provider_name)
-                    if _mp and _mp.is_available():
-                        self._memory_manager.add_provider(_mp)
+                    for _mpn in _mem_provider_names:
+                        _mp = _load_mem(_mpn)
+                        if _mp and _mp.is_available():
+                            self._memory_manager.add_provider(_mp)
+                        else:
+                            logger.debug("Memory provider '%s' not found or not available", _mpn)
                     if self._memory_manager.providers:
                         from hermes_constants import get_hermes_home as _ghh
                         _init_kwargs = {
@@ -1288,6 +1303,8 @@ class AIAgent:
                         # Thread gateway session key for stable per-chat Honcho session isolation
                         if self._gateway_session_key:
                             _init_kwargs["gateway_session_key"] = self._gateway_session_key
+                        if self._legacy_peer_ids:
+                            _init_kwargs["legacy_peer_ids"] = self._legacy_peer_ids
                         # Profile identity for per-profile provider scoping
                         try:
                             from hermes_cli.profiles import get_active_profile_name
@@ -1297,9 +1314,8 @@ class AIAgent:
                         except Exception:
                             pass
                         self._memory_manager.initialize_all(**_init_kwargs)
-                        logger.info("Memory provider '%s' activated", _mem_provider_name)
+                        logger.info("Memory providers %s activated", self._memory_manager.provider_names)
                     else:
-                        logger.debug("Memory provider '%s' not found or not available", _mem_provider_name)
                         self._memory_manager = None
             except Exception as _mpe:
                 logger.warning("Memory provider plugin init failed: %s", _mpe)
@@ -2409,6 +2425,7 @@ class AIAgent:
                 # Scan the review agent's messages for successful tool actions
                 # and surface a compact summary to the user.
                 actions = []
+                skill_notifications = []  # Track skill creates for main agent notification
                 for msg in getattr(review_agent, "_session_messages", []):
                     if not isinstance(msg, dict) or msg.get("role") != "tool":
                         continue
@@ -2422,6 +2439,9 @@ class AIAgent:
                     target = data.get("target", "")
                     if "created" in message.lower():
                         actions.append(message)
+                        # Skill creation — collect name/path for main agent notification
+                        skill_path = data.get("path") or data.get("skill_md") or ""
+                        skill_notifications.append((message, skill_path))
                     elif "updated" in message.lower():
                         actions.append(message)
                     elif "added" in message.lower() or (target and "add" in message.lower()):
@@ -2441,6 +2461,32 @@ class AIAgent:
                     if _bg_cb:
                         try:
                             _bg_cb(f"💾 {summary}")
+                        except Exception:
+                            pass
+
+                # Notify the main agent about skill creations so the LLM
+                # can respond when the user asks about them.
+                if skill_notifications:
+                    for msg_text, path in skill_notifications:
+                        note = msg_text
+                        if path:
+                            note += f" Path: {path}. Use skill_view to read it."
+                        # list.append is GIL-atomic — safe from background thread
+                        self._pending_bg_notifications.append(note)
+
+                    # Invalidate the main agent's cached system prompt so the
+                    # skills index rebuilds on the next turn.
+                    # Attribute assignment is GIL-atomic — safe from background thread.
+                    self._cached_system_prompt = None
+
+                    # Also clear the DB-stored prompt so the gateway path
+                    # (which loads from the session DB, not the instance cache)
+                    # rebuilds fresh on the next turn.
+                    if self._session_db:
+                        try:
+                            self._session_db.update_system_prompt(
+                                self.session_id, None
+                            )
                         except Exception:
                             pass
 
@@ -8315,6 +8361,14 @@ class AIAgent:
             if self._turns_since_memory >= self._memory_nudge_interval:
                 _should_review_memory = True
                 self._turns_since_memory = 0
+
+        # Drain any pending notifications from the background review thread.
+        # These appear before the user's new message so the LLM knows about
+        # skill/memory creates that happened between turns.
+        if self._pending_bg_notifications:
+            for _bg_note in self._pending_bg_notifications:
+                messages.append({"role": "user", "content": f"[System: {_bg_note}]"})
+            self._pending_bg_notifications.clear()
 
         # Add user message
         user_msg = {"role": "user", "content": user_message}

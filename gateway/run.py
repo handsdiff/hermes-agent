@@ -455,20 +455,76 @@ def _load_gateway_config() -> dict:
     return {}
 
 
-def _resolve_gateway_model(config: dict | None = None) -> str:
+def _resolve_gateway_model(config: dict | None = None, platform: str | None = None) -> str:
     """Read model from config.yaml — single source of truth.
 
     Without this, temporary AIAgent instances (memory flush, /compress) fall
     back to the hardcoded default which fails when the active provider is
     openai-codex.
+
+    When *platform* is provided, checks ``model.platforms.{platform}`` first,
+    falling back to the default model. This allows per-platform model overrides
+    (e.g. a cheaper model for Hub conversations).
     """
     cfg = config if config is not None else _load_gateway_config()
     model_cfg = cfg.get("model", {})
     if isinstance(model_cfg, str):
         return model_cfg
     elif isinstance(model_cfg, dict):
+        # Per-platform override (string shorthand or dict with model key)
+        if platform:
+            platforms = model_cfg.get("platforms")
+            if isinstance(platforms, dict):
+                override = platforms.get(platform)
+                if isinstance(override, str) and override:
+                    return override
+                if isinstance(override, dict) and override.get("model"):
+                    return override["model"]
         return model_cfg.get("default") or model_cfg.get("model") or ""
     return ""
+
+
+def _resolve_platform_provider_overrides(
+    config: dict | None = None,
+    platform: str | None = None,
+) -> dict | None:
+    """Return per-platform provider overrides (base_url, api_key) if configured.
+
+    Supports two config forms::
+
+        # String shorthand — model name only, same provider
+        model:
+          platforms:
+            hub: slate-2
+
+        # Dict — full provider override
+        model:
+          platforms:
+            hub:
+              model: slate-2
+              base_url: "https://other-endpoint/v1"
+              api_key: "sk-..."
+
+    Returns a dict with keys to merge into runtime_kwargs, or None.
+    """
+    if not platform:
+        return None
+    cfg = config if config is not None else _load_gateway_config()
+    model_cfg = cfg.get("model", {})
+    if not isinstance(model_cfg, dict):
+        return None
+    platforms = model_cfg.get("platforms")
+    if not isinstance(platforms, dict):
+        return None
+    override = platforms.get(platform)
+    if not isinstance(override, dict):
+        return None
+    result = {}
+    if override.get("base_url"):
+        result["base_url"] = override["base_url"]
+    if override.get("api_key"):
+        result["api_key"] = override["api_key"]
+    return result or None
 
 
 def _resolve_hermes_bin() -> Optional[list[str]]:
@@ -893,6 +949,50 @@ class GatewayRunner:
             thread_sessions_per_user=getattr(config, "thread_sessions_per_user", False),
         )
 
+    # Platforms where identity is not enforced by the transport layer.
+    # Owner detection is skipped for these to avoid false positives from
+    # spoofed user_ids.
+    _UNTRUSTED_IDENTITY_PLATFORMS = frozenset({
+        Platform.WEBHOOK,
+        Platform.API_SERVER,
+    })
+
+    def _is_owner_source(self, source) -> bool:
+        """Return True if this inbound source is the provisioned owner.
+
+        Strict check: only recognizes DM-shaped home channels where the
+        chat_id matches, the platform enforces identity, and chat_type was
+        explicitly set to "dm". Group-chat home channels and untrusted
+        platforms fall through to False.
+
+        On False, callers should continue to pass source.user_id to AIAgent
+        so non-owner callers land on their own transport-level peer.
+        """
+        if not source or not source.platform:
+            return False
+        if source.platform in self._UNTRUSTED_IDENTITY_PLATFORMS:
+            return False
+        # Defensive: test fixtures sometimes skip self.config entirely or
+        # stub it with a SimpleNamespace that lacks get_home_channel. Treat
+        # missing config surface as "no home channel known → not the owner".
+        _cfg = getattr(self, "config", None)
+        _get_hc = getattr(_cfg, "get_home_channel", None) if _cfg is not None else None
+        if not callable(_get_hc):
+            return False
+        hc = _get_hc(source.platform)
+        if not hc:
+            return False
+        if str(source.chat_id) != str(hc.chat_id):
+            return False
+        # Strict DM check. SessionSource.chat_type defaults to "dm"
+        # (gateway/session.py:78), so an adapter that forgets to set it for a
+        # group chat would pass this check — a false-positive vector. Adapters
+        # MUST set chat_type explicitly for non-DM sources. This is already
+        # the case for all shipped adapters (Discord, Telegram, Signal, etc.).
+        if getattr(source, "chat_type", None) != "dm":
+            return False
+        return True
+
     def _resolve_session_agent_runtime(
         self,
         *,
@@ -905,6 +1005,10 @@ class GatewayRunner:
         If the session override already contains a complete provider bundle
         (provider/api_key/base_url/api_mode), prefer it directly instead of
         resolving fresh global runtime state first.
+
+        When *source* is provided, per-platform model/provider overrides from
+        ``config.yaml`` (``model.platforms.<platform>``) are applied underneath
+        any session override.
         """
         resolved_session_key = session_key
         if not resolved_session_key and source is not None:
@@ -913,7 +1017,9 @@ class GatewayRunner:
             except Exception:
                 resolved_session_key = None
 
-        model = _resolve_gateway_model(user_config)
+        platform_key = _platform_config_key(source.platform) if source is not None else None
+
+        model = _resolve_gateway_model(user_config, platform=platform_key)
         override = self._session_model_overrides.get(resolved_session_key) if resolved_session_key else None
         if override:
             override_model = override.get("model", model)
@@ -944,6 +1050,9 @@ class GatewayRunner:
             )
 
         runtime_kwargs = _resolve_runtime_agent_kwargs()
+        platform_overrides = _resolve_platform_provider_overrides(user_config, platform=platform_key)
+        if platform_overrides:
+            runtime_kwargs = {**runtime_kwargs, **platform_overrides}
         if override and resolved_session_key:
             model, runtime_kwargs = self._apply_session_model_override(
                 resolved_session_key, model, runtime_kwargs
@@ -2575,6 +2684,16 @@ class GatewayRunner:
                 return None
             return QQAdapter(config)
 
+        elif platform == Platform.HUB:
+            from gateway.platforms.hub import HubAdapter, check_hub_requirements
+            if not check_hub_requirements():
+                logger.warning("Hub: httpx or websockets not installed")
+                return None
+            if not config.extra.get("agent_secret"):
+                logger.warning("Hub: agent_secret not configured")
+                return None
+            return HubAdapter(config)
+
         return None
 
     def _is_user_authorized(self, source: SessionSource) -> bool:
@@ -2593,7 +2712,10 @@ class GatewayRunner:
         # connection, so HA events are always authorized.
         # Webhook events are authenticated via HMAC signature validation in
         # the adapter itself — no user allowlist applies.
-        if source.platform in (Platform.HOMEASSISTANT, Platform.WEBHOOK):
+        # Hub agents authenticate with Hub via agent secrets — the per-user
+        # allowlist model doesn't apply to agent-to-agent messaging.  Hub is
+        # NOT in platform_env_map/platform_allow_all_map intentionally.
+        if source.platform in (Platform.HOMEASSISTANT, Platform.WEBHOOK, Platform.HUB):
             return True
 
         user_id = source.user_id
@@ -3856,7 +3978,8 @@ class GatewayRunner:
         if not history and source.platform and source.platform != Platform.LOCAL and source.platform != Platform.WEBHOOK:
             platform_name = source.platform.value
             env_key = f"{platform_name.upper()}_HOME_CHANNEL"
-            if not os.getenv(env_key):
+            has_home = os.getenv(env_key) or (self.config and self.config.get_home_channel(source.platform))
+            if not has_home:
                 adapter = self.adapters.get(source.platform)
                 if adapter:
                     await adapter.send(
@@ -5156,9 +5279,21 @@ class GatewayRunner:
         platform_name = source.platform.value if source.platform else "unknown"
         chat_id = source.chat_id
         chat_name = source.chat_name or chat_id
-        
+
         env_key = f"{platform_name.upper()}_HOME_CHANNEL"
-        
+
+        # If a home channel is already set, reject. Home channel is set during
+        # provisioning or on first use and cannot be changed via /sethome.
+        existing_home = os.environ.get(env_key, "").strip()
+        if not existing_home and self.config:
+            platform_enum = source.platform
+            if platform_enum:
+                hc = self.config.get_home_channel(platform_enum)
+                if hc:
+                    existing_home = str(hc.chat_id)
+        if existing_home:
+            return "Home channel is already set and cannot be changed."
+
         # Save to config.yaml
         try:
             import yaml
@@ -5173,7 +5308,7 @@ class GatewayRunner:
             os.environ[env_key] = str(chat_id)
         except Exception as e:
             return f"Failed to save home channel: {e}"
-        
+
         return (
             f"✅ Home channel set to **{chat_name}** (ID: {chat_id}).\n"
             f"Cron jobs and cross-platform messages will be delivered here."
@@ -5727,6 +5862,12 @@ class GatewayRunner:
             self._service_tier = self._load_service_tier()
             turn_route = self._resolve_turn_agent_config(prompt, model, runtime_kwargs)
 
+            _is_owner = self._is_owner_source(source)
+            _legacy_peers = (
+                [str(hc.chat_id) for p in Platform
+                 if (hc := self.config.get_home_channel(p))]
+            ) if _is_owner else []
+
             def run_sync():
                 agent = AIAgent(
                     model=turn_route["model"],
@@ -5746,7 +5887,8 @@ class GatewayRunner:
                     provider_data_collection=pr.get("data_collection"),
                     session_id=task_id,
                     platform=platform_key,
-                    user_id=source.user_id,
+                    user_id=None if _is_owner else source.user_id,
+                    legacy_peer_ids=_legacy_peers,
                     session_db=self._session_db,
                     fallback_model=self._fallback_model,
                 )
@@ -5889,7 +6031,6 @@ class GatewayRunner:
                 )
                 return
 
-            platform_key = _platform_config_key(source.platform)
             reasoning_config = self._load_reasoning_config()
             self._service_tier = self._load_service_tier()
             turn_route = self._resolve_turn_agent_config(question, model, runtime_kwargs)
@@ -6859,7 +7000,7 @@ class GatewayRunner:
         Platform.TELEGRAM, Platform.DISCORD, Platform.SLACK, Platform.WHATSAPP,
         Platform.SIGNAL, Platform.MATTERMOST, Platform.MATRIX,
         Platform.HOMEASSISTANT, Platform.EMAIL, Platform.SMS, Platform.DINGTALK,
-        Platform.FEISHU, Platform.WECOM, Platform.WECOM_CALLBACK, Platform.WEIXIN, Platform.BLUEBUBBLES, Platform.QQBOT, Platform.LOCAL,
+        Platform.FEISHU, Platform.WECOM, Platform.WECOM_CALLBACK, Platform.WEIXIN, Platform.BLUEBUBBLES, Platform.QQBOT, Platform.LOCAL, Platform.HUB,
     })
 
     async def _handle_debug_command(self, event: MessageEvent) -> str:
@@ -7710,7 +7851,11 @@ class GatewayRunner:
                             break
                     if adapter and source.chat_id:
                         try:
+                            import dataclasses as _dc
                             from gateway.platforms.base import MessageEvent, MessageType
+                            # Force chat_type="synthetic" so owner-detection doesn't
+                            # treat the synthetic bg notification as a real DM turn.
+                            source = _dc.replace(source, chat_type="synthetic")
                             synth_event = MessageEvent(
                                 text=synth_text,
                                 message_type=MessageType.TEXT,
@@ -8185,7 +8330,7 @@ class GatewayRunner:
         # tool progress and token streaming. Users can keep tool_progress quiet
         # in chat platforms while opting into concise mid-turn updates.
         interim_assistant_messages_enabled = (
-            source.platform != Platform.WEBHOOK
+            source.platform not in (Platform.WEBHOOK, Platform.HUB)
             and is_truthy_value(
                 display_config.get("interim_assistant_messages"),
                 default=True,
@@ -8595,6 +8740,12 @@ class GatewayRunner:
 
             turn_route = self._resolve_turn_agent_config(message, model, runtime_kwargs)
 
+            _is_owner = self._is_owner_source(source)
+            _legacy_peers = (
+                [str(hc.chat_id) for p in Platform
+                 if (hc := self.config.get_home_channel(p))]
+            ) if _is_owner else []
+
             # Check agent cache — reuse the AIAgent from the previous message
             # in this session to preserve the frozen system prompt and tool
             # schemas for prompt cache hits.
@@ -8642,8 +8793,9 @@ class GatewayRunner:
                     provider_data_collection=pr.get("data_collection"),
                     session_id=session_id,
                     platform=platform_key,
-                    user_id=source.user_id,
+                    user_id=None if _is_owner else source.user_id,
                     gateway_session_key=session_key,
+                    legacy_peer_ids=_legacy_peers,
                     session_db=self._session_db,
                     fallback_model=self._fallback_model,
                 )
@@ -8658,7 +8810,13 @@ class GatewayRunner:
             agent.step_callback = _step_callback_sync if _hooks_ref.loaded_hooks else None
             agent.stream_delta_callback = _stream_delta_cb
             agent.interim_assistant_callback = _interim_assistant_cb if _want_interim_messages else None
-            agent.status_callback = _status_callback_sync
+            # Hub carries agent-to-agent traffic — lifecycle/status messages
+            # (rate-limit notices, retries, fallbacks) have no value to the
+            # partner agent and amplify into a feedback loop when each status
+            # ping triggers a fresh LLM call on the receiving side.
+            agent.status_callback = (
+                None if source.platform == Platform.HUB else _status_callback_sync
+            )
             agent.reasoning_config = reasoning_config
             agent.service_tier = self._service_tier
             agent.request_overrides = turn_route.get("request_overrides")
@@ -9324,7 +9482,8 @@ class GatewayRunner:
             _result_for_fb = result_holder[0]
             _run_failed = _result_for_fb.get("failed") if _result_for_fb else False
             if _agent is not None and hasattr(_agent, 'model') and not _run_failed:
-                _cfg_model = _resolve_gateway_model()
+                _platform_key = _platform_config_key(source.platform) if source else None
+                _cfg_model = _resolve_gateway_model(platform=_platform_key)
                 if _agent.model != _cfg_model and not self._is_intentional_model_switch(session_key, _agent.model):
                     # Fallback activated on a successful run — evict cached
                     # agent so the next message retries the primary model.
