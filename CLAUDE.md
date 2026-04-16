@@ -9,7 +9,7 @@ This is the `handsdiff/hermes-agent` fork of `NousResearch/hermes-agent`.
 
 ## Open PRs to upstream
 
-9 open PRs, all targeting `NousResearch/hermes-agent` main:
+8 open PRs, all targeting `NousResearch/hermes-agent` main:
 
 | PR | Branch | What | Depends on |
 |----|--------|------|------------|
@@ -21,9 +21,10 @@ This is the `handsdiff/hermes-agent` fork of `NousResearch/hermes-agent`.
 | #9308 | `feat/user-unify` | Unify owner identity across channels in Honcho memory | #9287 |
 | #9829 | `fix/bg-skill-notify` | Notify main agent when background review creates skills | — |
 | #9911 | `fix/session-list-sort` | Sort session listing by last activity, not creation time | — |
-| #9924 | `fix/pty-job-control-hang` | Prevent agent hang when backgrounding processes via PTY | — |
 
-Merged: #6851 (telegram custom base_url). The `telegram-base-url-upstream` branch can be deleted as cleanup.
+Merged:
+- #6851 (telegram custom base_url). The `telegram-base-url-upstream` branch can be deleted as cleanup.
+- #9924 (pty-job-control-hang) — cherry-picked via upstream #10584 with authorship preserved. The `fix/pty-job-control-hang` branch can be deleted as cleanup.
 
 ### Stacked branches
 
@@ -33,7 +34,7 @@ rebase `feat/cron-memory-peers` first, then rebase `feat/user-unify` onto it.
 
 ## Fork main structure
 
-Fork `main` = upstream `main` + all 6 open-PR branches + the `fork-only` branch merged together.
+Fork `main` = upstream `main` + all open-PR branches + the `fork-only` branch merged together.
 This is intentional: `hermes-provisioner/provision.py` clones this fork and depends on
 all branches being present. Do not remove any branch from fork main until its PR lands upstream.
 
@@ -57,7 +58,6 @@ When upstream `main` moves:
    git checkout feat/cron-memory-peers && git rebase upstream/main
    git checkout fix/bg-skill-notify && git rebase upstream/main
    git checkout fix/session-list-sort && git rebase upstream/main
-   git checkout fix/pty-job-control-hang && git rebase upstream/main
    git checkout fork-only && git rebase upstream/main
    ```
 3. Rebase stacked branches onto their parent (not upstream/main):
@@ -69,7 +69,7 @@ When upstream `main` moves:
    ```
    git checkout main
    git reset --hard upstream/main
-   git merge hub-adapter feat/multi-memory-provider fix/lock-sethome-after-first-use feat/per-platform-model feat/cron-memory-peers feat/user-unify fix/bg-skill-notify fix/session-list-sort fix/pty-job-control-hang fork-only
+   git merge hub-adapter feat/multi-memory-provider fix/lock-sethome-after-first-use feat/per-platform-model feat/cron-memory-peers feat/user-unify fix/bg-skill-notify fix/session-list-sort fork-only
    ```
 6. Force-push fork main.
 
