@@ -22,8 +22,8 @@ All targeting `NousResearch/hermes-agent` main:
 | #9829 | `fix/bg-skill-notify` | Notify main agent when background review creates skills | — |
 | #9911 | `fix/session-list-sort` | Sort session listing by last activity, not creation time | — |
 | #11617 | `fix/compressor-tool-args-valid-json` | Keep truncated tool_call arguments as valid JSON | — |
-| TBD | `fix/mcp-initial-connect-retries` | Bump MCP initial connect retries 3→6 for slow warmups | — |
-| TBD | `fix/mcp-sse-transport` | Support SSE transport alongside Streamable HTTP | — |
+| #11646 | `fix/mcp-initial-connect-retries` | Bump MCP initial connect retries 3→6 for slow warmups | — |
+| #11647 | `fix/mcp-sse-transport` | Support SSE transport alongside Streamable HTTP | — |
 
 Merged:
 - #6851 (telegram custom base_url). The `telegram-base-url-upstream` branch can be deleted as cleanup.
