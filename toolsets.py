@@ -48,6 +48,8 @@ _HERMES_CORE_TOOLS = [
     "text_to_speech",
     # Planning & memory
     "todo", "memory",
+    # Platform-provisioned integrations (external API auth discovery)
+    "integrations",
     # Session history search
     "session_search",
     # Clarifying questions
