@@ -459,7 +459,18 @@ class ContextCompressor(ContextEngine):
                 if isinstance(tc, dict):
                     args = tc.get("function", {}).get("arguments", "")
                     if len(args) > 500:
-                        tc = {**tc, "function": {**tc["function"], "arguments": args[:200] + "...[truncated]"}}
+                        # `arguments` is a JSON string. Some providers
+                        # (e.g. Anthropic via LiteLLM) re-parse it when
+                        # rebuilding tool_use blocks, so byte-slicing it
+                        # produces invalid JSON and the next request fails
+                        # with HTTP 400. Replace with a compact sentinel
+                        # object that stays valid JSON.
+                        truncated_payload = json.dumps({
+                            "_truncated": True,
+                            "_original_length": len(args),
+                            "_preview": args[:200],
+                        })
+                        tc = {**tc, "function": {**tc["function"], "arguments": truncated_payload}}
                         modified = True
                 new_tcs.append(tc)
             if modified:

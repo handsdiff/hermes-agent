@@ -1,5 +1,7 @@
 """Tests for agent/context_compressor.py — compression logic, thresholds, truncation fallback."""
 
+import json
+
 import pytest
 from unittest.mock import patch, MagicMock
 
@@ -781,3 +783,46 @@ class TestTokenBudgetTailProtection:
         # Tool at index 2 is outside the protected tail (last 3 = indices 2,3,4)
         # so it might or might not be pruned depending on boundary
         assert isinstance(pruned, int)
+
+    def test_pruned_tool_call_args_remain_valid_json(self, budget_compressor):
+        """Truncated tool_call `arguments` must stay parseable JSON.
+
+        Some providers (e.g. Anthropic via LiteLLM) re-parse the arguments
+        string when rebuilding tool_use blocks. If pruning leaves invalid
+        JSON in place, the next API call fails with HTTP 400 and the
+        session gets stuck — replaying the corrupted history on every turn.
+        """
+        c = budget_compressor
+        huge_args = json.dumps({
+            "mode": "replace",
+            "path": "/some/file.ts",
+            "old_string": "placeholder",
+            "new_string": "    const colMatches = sql.matchAll(/(\\w+)\\s+(text|integer)/gi);\n"
+                          + ("  // padding line to exceed 500 chars\n" * 40),
+        })
+        assert len(huge_args) > 500
+        messages = [
+            {"role": "user", "content": "start"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{
+                    "id": "c1",
+                    "type": "function",
+                    "function": {"name": "patch", "arguments": huge_args},
+                }],
+            },
+            {"role": "tool", "content": "ok", "tool_call_id": "c1"},
+            {"role": "user", "content": "recent"},
+            {"role": "assistant", "content": "reply"},
+        ]
+        result, _ = c._prune_old_tool_results(messages, protect_tail_count=2)
+        pruned_msg = next(m for m in result if m.get("tool_calls"))
+        pruned_args = pruned_msg["tool_calls"][0]["function"]["arguments"]
+        # Must be valid JSON — otherwise Anthropic re-parse will explode.
+        parsed = json.loads(pruned_args)
+        assert parsed["_truncated"] is True
+        assert parsed["_original_length"] == len(huge_args)
+        assert isinstance(parsed["_preview"], str) and parsed["_preview"]
+        # Sentinel must actually be smaller than the original.
+        assert len(pruned_args) < len(huge_args)
