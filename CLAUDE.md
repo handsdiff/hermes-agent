@@ -9,7 +9,7 @@ This is the `handsdiff/hermes-agent` fork of `NousResearch/hermes-agent`.
 
 ## Open PRs to upstream
 
-8 open PRs, all targeting `NousResearch/hermes-agent` main:
+All targeting `NousResearch/hermes-agent` main:
 
 | PR | Branch | What | Depends on |
 |----|--------|------|------------|
@@ -21,10 +21,30 @@ This is the `handsdiff/hermes-agent` fork of `NousResearch/hermes-agent`.
 | #9308 | `feat/user-unify` | Unify owner identity across channels in Honcho memory | #9287 |
 | #9829 | `fix/bg-skill-notify` | Notify main agent when background review creates skills | — |
 | #9911 | `fix/session-list-sort` | Sort session listing by last activity, not creation time | — |
+| #11617 | `fix/compressor-tool-args-valid-json` | Keep truncated tool_call arguments as valid JSON | — |
+| TBD | `fix/mcp-initial-connect-retries` | Bump MCP initial connect retries 3→6 for slow warmups | — |
+| TBD | `fix/mcp-sse-transport` | Support SSE transport alongside Streamable HTTP | — |
 
 Merged:
 - #6851 (telegram custom base_url). The `telegram-base-url-upstream` branch can be deleted as cleanup.
 - #9924 (pty-job-control-hang) — cherry-picked via upstream #10584 with authorship preserved. The `fix/pty-job-control-hang` branch can be deleted as cleanup.
+
+### ⚠️ Always branch off `upstream/main`, never off fork `main`
+
+Every feature branch must be cut from `upstream/main`. If you branch off fork `main`,
+the branch inherits *every other fork branch's content* (because fork main is an
+octopus merge of all of them). The upstream PR then shows a ~100k-line diff including
+unrelated work and fork-only skill deletions — unreviewable and unmergeable. This has
+happened three times already (MCP retries, MCP SSE, compressor fix were all originally
+cut off fork main and had to be rebuilt from scratch off `upstream/main`).
+
+```
+# correct
+git checkout -b my-feature upstream/main
+
+# WRONG — will pollute the branch with every other feature
+git checkout -b my-feature main
+```
 
 ### Stacked branches
 
@@ -58,6 +78,9 @@ When upstream `main` moves:
    git checkout feat/cron-memory-peers && git rebase upstream/main
    git checkout fix/bg-skill-notify && git rebase upstream/main
    git checkout fix/session-list-sort && git rebase upstream/main
+   git checkout fix/compressor-tool-args-valid-json && git rebase upstream/main
+   git checkout fix/mcp-initial-connect-retries && git rebase upstream/main
+   git checkout fix/mcp-sse-transport && git rebase upstream/main
    git checkout fork-only && git rebase upstream/main
    ```
 3. Rebase stacked branches onto their parent (not upstream/main):
@@ -69,7 +92,12 @@ When upstream `main` moves:
    ```
    git checkout main
    git reset --hard upstream/main
-   git merge hub-adapter feat/multi-memory-provider fix/lock-sethome-after-first-use feat/per-platform-model feat/cron-memory-peers feat/user-unify fix/bg-skill-notify fix/session-list-sort fork-only
+   git merge hub-adapter feat/multi-memory-provider fix/lock-sethome-after-first-use \
+             feat/per-platform-model feat/cron-memory-peers feat/user-unify \
+             fix/bg-skill-notify fix/session-list-sort \
+             fix/compressor-tool-args-valid-json \
+             fix/mcp-initial-connect-retries fix/mcp-sse-transport \
+             fork-only
    ```
 6. Force-push fork main.
 
@@ -135,3 +163,11 @@ mlops, red-teaming, smart-home, social-media, plus empty category stubs (diagram
 domain, feeds, gifs, inference-sh). Partial deletions: creative (kept ideation,
 excalidraw, p5js, popular-web-designs), media (kept gif-search, youtube-content),
 productivity (kept nano-pdf, ocr-and-documents). 35 skills remain from original ~78.
+
+**Integrations tool (fork-only branch):** `tools/integrations_tool.py` exposes the
+provisioner-written manifest at `$HERMES_HOME/integrations.json` as a discoverable
+tool. Fork-only because it's specific to the exe.dev proxy model and references
+`niyant@slate.ceo` as the platform admin contact. Auto-registers via
+`tools/registry.py:discover_builtin_tools()`; listed in `_HERMES_CORE_TOOLS` in
+`toolsets.py` so it's exposed to every platform. If provisioner isn't wired up, the
+manifest file is absent and the tool returns an explanatory empty result.
