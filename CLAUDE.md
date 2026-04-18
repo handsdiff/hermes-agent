@@ -16,7 +16,6 @@ All targeting `NousResearch/hermes-agent` main:
 | #5957 | `hub-adapter` | Hub messaging platform adapter | — |
 | #5688 | `feat/multi-memory-provider` | Multiple simultaneous memory providers | — |
 | #7232 | `fix/lock-sethome-after-first-use` | Lock /sethome after home channel is set | — |
-| #7297 | `feat/per-platform-model` | Per-platform model overrides via config.yaml | — |
 | #9287 | `feat/cron-memory-peers` | Per-job Honcho peers for cron (+ revert #6995 guard) | — |
 | #9308 | `feat/user-unify` | Unify owner identity across channels in Honcho memory | #9287 |
 | #9829 | `fix/bg-skill-notify` | Notify main agent when background review creates skills | — |
@@ -24,10 +23,16 @@ All targeting `NousResearch/hermes-agent` main:
 | #11617 | `fix/compressor-tool-args-valid-json` | Keep truncated tool_call arguments as valid JSON | — |
 | #11646 | `fix/mcp-initial-connect-retries` | Bump MCP initial connect retries 3→6 for slow warmups | — |
 | #11647 | `fix/mcp-sse-transport` | Support SSE transport alongside Streamable HTTP | — |
+| #12207 | `fix/compound-background-subshell-leak` | Rewrite `A && B &` to prevent subshell leak in terminal | — |
+| #12234 | `feat/model-routing` | Match-based model routing via `model.routes` (subsumes per-platform + per-source) | — |
 
 Merged:
 - #6851 (telegram custom base_url). The `telegram-base-url-upstream` branch can be deleted as cleanup.
 - #9924 (pty-job-control-hang) — cherry-picked via upstream #10584 with authorship preserved. The `fix/pty-job-control-hang` branch can be deleted as cleanup.
+
+Closed / superseded:
+- #7297 (per-platform model overrides) — superseded by #12234. Branch `feat/per-platform-model` already deleted from origin.
+- #12227 (per-source model selection, draft) — superseded by #12234. Branch `feat/per-source-model` already deleted from origin.
 
 ### ⚠️ Always branch off `upstream/main`, never off fork `main`
 
@@ -74,13 +79,14 @@ When upstream `main` moves:
    git checkout hub-adapter && git rebase upstream/main
    git checkout feat/multi-memory-provider && git rebase upstream/main
    git checkout fix/lock-sethome-after-first-use && git rebase upstream/main
-   git checkout feat/per-platform-model && git rebase upstream/main
+   git checkout feat/model-routing && git rebase upstream/main
    git checkout feat/cron-memory-peers && git rebase upstream/main
    git checkout fix/bg-skill-notify && git rebase upstream/main
    git checkout fix/session-list-sort && git rebase upstream/main
    git checkout fix/compressor-tool-args-valid-json && git rebase upstream/main
    git checkout fix/mcp-initial-connect-retries && git rebase upstream/main
    git checkout fix/mcp-sse-transport && git rebase upstream/main
+   git checkout fix/compound-background-subshell-leak && git rebase upstream/main
    git checkout fork-only && git rebase upstream/main
    ```
 3. Rebase stacked branches onto their parent (not upstream/main):
@@ -88,17 +94,29 @@ When upstream `main` moves:
    git checkout feat/user-unify && git rebase feat/cron-memory-peers
    ```
 4. Force-push each branch to origin.
-5. Rebuild fork main: reset to `upstream/main`, then merge all branches:
+5. Rebuild fork main: reset to `upstream/main`, then merge all branches. The
+   octopus strategy (`git merge A B C ...` in one go) fails when any two
+   branches add code to adjacent lines in the same function. Use sequential
+   `git merge` instead — 3-way recursive is more forgiving:
    ```
    git checkout main
    git reset --hard upstream/main
-   git merge hub-adapter feat/multi-memory-provider fix/lock-sethome-after-first-use \
-             feat/per-platform-model feat/cron-memory-peers feat/user-unify \
-             fix/bg-skill-notify fix/session-list-sort \
-             fix/compressor-tool-args-valid-json \
-             fix/mcp-initial-connect-retries fix/mcp-sse-transport \
-             fork-only
+   for b in hub-adapter feat/multi-memory-provider fix/lock-sethome-after-first-use \
+            feat/cron-memory-peers feat/user-unify \
+            fix/bg-skill-notify fix/session-list-sort \
+            fix/compressor-tool-args-valid-json \
+            fix/mcp-initial-connect-retries fix/mcp-sse-transport \
+            fix/compound-background-subshell-leak \
+            feat/model-routing \
+            fork-only; do
+     git merge --no-edit "$b" || break
+   done
    ```
+   If a conflict fires, resolve by union (take both sides' additions — same
+   function, non-overlapping edits), commit the merge, then continue the
+   loop manually with the remaining branches. This happens most often at the
+   `_classify_source_kind` / `_is_owner_source` adjacency in `gateway/run.py`
+   when `feat/model-routing` meets `feat/user-unify`.
 6. Force-push fork main.
 
 ## Post-rebase pitfalls
@@ -136,9 +154,17 @@ notification's synthetic SessionSource to prevent false-positive owner detection
 overrides on provisioned agents. Adds `skip_memory=True` to hygiene compress agent.
 Adds `shutdown_memory_provider()` to cron teardown.
 
-**#7297 (per-platform model):** Redesigned during rebase to align with upstream's
-`_resolve_session_agent_runtime` refactor. Single integration point — every call site
-gets platform overrides for free. If reviewers ask, this version matches their refactoring direction.
+**#12234 (model-routing):** Supersedes closed #7297 (per-platform) and #12227 (per-source).
+Adds `agent/smart_model_routing.apply_route(model, runtime, model_config, context)` —
+a pure helper that iterates `model.routes` and applies the first entry whose `match`
+predicates match the caller's context dict. Gateway classifies `owner / hub_peer /
+stranger` via `_classify_source_kind` (delegates to `_is_owner_source` for the owner
+check on fork main); cron and CLI hardcode their own context. Legacy
+`model.platforms.<name>` and `model.by_source.<kind>` configs are auto-synthesized into
+routes at match time, so no deployed config breaks. When rebasing, expect a conflict
+at the `_classify_source_kind` / `_is_owner_source` adjacency in `gateway/run.py` —
+union-resolve (keep both methods, have `_classify_source_kind` delegate to
+`_is_owner_source`).
 
 **#5688 (multi-memory-provider):** Re-added `MemoryManager.provider_names` property
 after upstream dead-code sweep deleted it. Branch depends on it in `run_agent.py`.
