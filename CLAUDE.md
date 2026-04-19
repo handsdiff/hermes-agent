@@ -26,7 +26,8 @@ All targeting `NousResearch/hermes-agent` main:
 | #12207 | `fix/compound-background-subshell-leak` | Rewrite `A && B &` to prevent subshell leak in terminal | — |
 | #12234 | `feat/model-routing` | Match-based model routing via `model.routes` (subsumes per-platform + per-source) | — |
 | #12590 | `feat/epub-document-support` | Add `.epub` to `SUPPORTED_DOCUMENT_TYPES` allowlist (shared by telegram/slack/discord/feishu/whatsapp document handlers) | — |
-| #12606 | `fix/rehydrate-compaction-summary` | Rehydrate `ContextCompressor._previous_summary` from transcript on agent boot so the UPDATE-prompt compaction chain survives process restarts and agent-cache eviction | — |
+| #12702 | `feat/html-document-support` | Add `.html` / `.htm` to the same allowlist | — |
+| #12606 | `feat/rehydrate-compaction-summary` | Rehydrate `ContextCompressor._previous_summary` from transcript on agent boot so the UPDATE-prompt compaction chain survives process restarts and agent-cache eviction | — |
 | #12686 | `fix/route-aware-background-agents` | Carry `model.routes` bundle through flush-memory and background-review spawn sites so post-turn auxiliary calls don't pair the routed `model` with the config-default `base_url` | — |
 
 Merged:
@@ -91,7 +92,8 @@ When upstream `main` moves:
    git checkout fix/mcp-sse-transport && git rebase upstream/main
    git checkout fix/compound-background-subshell-leak && git rebase upstream/main
    git checkout feat/epub-document-support && git rebase upstream/main
-   git checkout fix/rehydrate-compaction-summary && git rebase upstream/main
+   git checkout feat/html-document-support && git rebase upstream/main
+   git checkout feat/rehydrate-compaction-summary && git rebase upstream/main
    git checkout fix/route-aware-background-agents && git rebase upstream/main
    git checkout fork-only && git rebase upstream/main
    ```
@@ -115,7 +117,8 @@ When upstream `main` moves:
             fix/compound-background-subshell-leak \
             feat/model-routing \
             feat/epub-document-support \
-            fix/rehydrate-compaction-summary \
+            feat/html-document-support \
+            feat/rehydrate-compaction-summary \
             fix/route-aware-background-agents \
             fork-only; do
      git merge --no-edit "$b" || break
@@ -194,6 +197,11 @@ start of `run_conversation()` as `[System: ...]` messages. Also invalidates
 whatsapp) imports and uses this allowlist, so adding `.epub → application/epub+zip`
 there lights up epub uploads across all of them. Paired with the OCR skill's
 `marker` extractor which already supports epub.
+
+**#12702 (html):** Same shape as #12590 — adds `.html` and `.htm` → `text/html`
+to the same allowlist. Expect a union-merge conflict with #12590 on the
+`SUPPORTED_DOCUMENT_TYPES` dict and the parametrize list in
+`tests/gateway/test_document_cache.py` when rebuilding fork main.
 
 **#12606 (rehydrate-compaction-summary):** `ContextCompressor._previous_summary` is
 an in-memory field that enables the UPDATE-prompt compaction chain (preserves prior
