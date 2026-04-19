@@ -16,19 +16,19 @@ What it changes at import time:
    connects to ``wss://discord-gateway.slate.ceo/tkt/<ticket>``. dg-proxy
    on sf1 rewrites the IDENTIFY frame with the real bot token.
 
-4. Gateway compression forced off — dg-proxy doesn't handle zlib-stream
-   (could be added later; keep it simple for now).
+4. Gateway compression forced off — dg-proxy doesn't handle zlib-stream.
 
-5. Ticket minting retries transient failures (3x, 2s backoff) so a short
+5. RESUME forced off. discord.py's built-in reconnect logic tries RESUME
+   (op 6) after a WS drop, re-sending the client's stored session_id +
+   the placeholder token. dg-proxy only rewrites IDENTIFY (op 2), so a
+   RESUME reaches Discord with the placeholder and gets close code 4004
+   (auth failed). Forcing resume=False makes every reconnect a full
+   IDENTIFY with a fresh ticket, which the proxy does rewrite.
+
+6. Ticket minting retries transient failures (3×, 2s backoff) so a short
    provisioner blip doesn't kill a reconnect attempt.
 
-6. ``Client.start()`` is wrapped in a respawn loop. discord.py's own
-   reconnect logic can exit on any exception that propagates out of
-   ``connect()``; without respawn the adapter task completes and Discord
-   stays dark until the whole process restarts. The wrapper re-enters
-   ``start()`` after a short backoff on any non-cancellation exit.
-
-Imported via ``sitecustomize.py`` in the venv so the monkey-patches apply
+Imported via a ``.pth`` file in the venv so these monkey-patches apply
 before hermes's own imports of discord.py.
 """
 
@@ -46,7 +46,6 @@ try:
     import discord.http
     import discord.gateway
 except Exception:
-    # If any of these fail we can't patch. Leave discord.py alone.
     raise
 
 log = logging.getLogger("dg-patch")
@@ -59,7 +58,7 @@ _WS_PUBLIC_BASE = "wss://discord-gateway.slate.ceo"
 # --- 1. REST base URL ------------------------------------------------------
 discord.http.Route.BASE = _HTTP_BASE
 
-# --- 2. Never attach Authorization from the client. Auth is transport-layer.
+# --- 2. Strip client-side Authorization. Transport-layer auth only. -------
 _orig_request = discord.http.HTTPClient.request
 
 
@@ -75,7 +74,7 @@ async def _patched_request(self, route, *args, **kwargs):
 discord.http.HTTPClient.request = _patched_request
 
 
-# --- 3. Gateway URL: mint a fresh ticket per connect, retrying on blips ---
+# --- 3. Gateway URL: mint a fresh ticket per connect, retry on blips ------
 async def _mint_ws_url(retries: int = 3, backoff: float = 2.0) -> str:
     last_exc: Exception | None = None
     for attempt in range(1, retries + 1):
@@ -85,7 +84,7 @@ async def _mint_ws_url(retries: int = 3, backoff: float = 2.0) -> str:
                     r.raise_for_status()
                     body = await r.json()
             return body["ws_url"]
-        except Exception as e:  # network, HTTP status, JSON
+        except Exception as e:
             last_exc = e
             if attempt < retries:
                 log.warning(
@@ -101,25 +100,40 @@ _orig_from_client = discord.gateway.DiscordWebSocket.from_client.__func__
 
 
 @classmethod
-async def _patched_from_client(cls, client, *, gateway=None, compress=True, **kw):
-    # dg-proxy currently runs plain JSON; force compress off so Discord
-    # doesn't ship us zlib-stream frames we can't parse.
+async def _patched_from_client(
+    cls, client, *,
+    gateway=None, compress=True, resume=False,
+    session=None, sequence=None, **kw,
+):
+    # Force compress=False: dg-proxy does not decode zlib-stream.
+    # Force resume=False + drop session/sequence: RESUME frames carry the
+    # placeholder token through dg-proxy un-rewritten, causing Discord to
+    # reply 4004 (auth failed). We re-IDENTIFY on every reconnect instead,
+    # minting a fresh ticket each time.
     compress = False
-    if gateway is None:
-        url = await _mint_ws_url()
-        gateway = yarl.URL(url)
+    resume = False
+    session = None
+    sequence = None
+    # Always mint a fresh ticket. Any gateway URL discord.py carries over
+    # from a prior connect has an already-consumed ticket that dg-proxy
+    # will reject (4401); reusing it gives us no value. Stateless URL per
+    # from_client call.
+    url = await _mint_ws_url()
+    gateway = yarl.URL(url)
     return await _orig_from_client(
-        cls, client, gateway=gateway, compress=compress, **kw
+        cls, client,
+        gateway=gateway, compress=compress, resume=resume,
+        session=session, sequence=sequence, **kw,
     )
 
 
 discord.gateway.DiscordWebSocket.from_client = _patched_from_client
 
 
-# --- 4. AutoSharded path uses HTTPClient.get_bot_gateway directly ---------
+# --- 4. Sharded clients use HTTPClient.get_bot_gateway for the gateway URL.
 try:
     from discord.http import SessionStartLimit
-except Exception:  # pragma: no cover — older discord.py
+except Exception:
     SessionStartLimit = None
 
 
@@ -143,54 +157,12 @@ async def _patched_get_gateway(self, *, encoding="json", zlib=False, v=10):
 
 discord.http.HTTPClient.get_gateway = _patched_get_gateway
 
-# --- 5. Fallback DEFAULT_GATEWAY — unused path but worth being sane ------
+# --- 5. Fallback DEFAULT_GATEWAY (rarely used; sanity only). --------------
 discord.gateway.DiscordWebSocket.DEFAULT_GATEWAY = yarl.URL(_WS_PUBLIC_BASE + "/")
 
 
-# --- 6. Respawn Client.start on any exit. discord.py's reconnect loop can
-#       propagate exceptions out to callers (LoginFailure on 401 during a
-#       reconnect, unhandled WS closures, etc); hermes spawns Client.start
-#       as a one-shot task without a respawner so a single reconnect death
-#       = Discord permanently offline for that process. We wrap start() at
-#       the class level so every subclass (commands.Bot, AutoShardedBot)
-#       gets the same loop.
-_orig_start = discord.Client.start
-_BACKOFF_SCHEDULE = [5, 15, 30, 60, 120]  # capped backoff; indefinite retries
-
-
-async def _patched_start(self, *args, **kwargs):
-    attempt = 0
-    while True:
-        try:
-            await _orig_start(self, *args, **kwargs)
-            # Clean exit means Client.close() was called intentionally.
-            log.info("dg-patch: Client.start returned cleanly; respawn loop exiting")
-            return
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            delay = _BACKOFF_SCHEDULE[min(attempt, len(_BACKOFF_SCHEDULE) - 1)]
-            log.warning(
-                "dg-patch: Client.start exited with %s; respawning in %ds (attempt %d)",
-                type(e).__name__, delay, attempt + 1,
-            )
-            # discord.py Client._closed is an asyncio.Event; clear it so
-            # start() can run again. Ready event cleared for the same reason.
-            try:
-                if hasattr(self, "_closed") and hasattr(self._closed, "clear"):
-                    self._closed.clear()
-                if hasattr(self, "_ready") and hasattr(self._ready, "clear"):
-                    self._ready.clear()
-            except Exception:
-                pass
-            await asyncio.sleep(delay)
-            attempt += 1
-
-
-discord.Client.start = _patched_start
-
 
 log.warning(
-    "dg-patch active vm=%s rest=%s ws=%s (with retry+respawn)",
+    "dg-patch active vm=%s rest=%s ws=%s (resume disabled, ticket retry=3)",
     _VM, _HTTP_BASE, _WS_PUBLIC_BASE,
 )
