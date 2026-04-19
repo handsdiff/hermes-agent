@@ -20,7 +20,6 @@ All targeting `NousResearch/hermes-agent` main:
 | #9308 | `feat/user-unify` | Unify owner identity across channels in Honcho memory | #9287 |
 | #9829 | `fix/bg-skill-notify` | Notify main agent when background review creates skills | — |
 | #9911 | `fix/session-list-sort` | Sort session listing by last activity, not creation time | — |
-| #11617 | `fix/compressor-tool-args-valid-json` | Keep truncated tool_call arguments as valid JSON | — |
 | #11646 | `fix/mcp-initial-connect-retries` | Bump MCP initial connect retries 3→6 for slow warmups | — |
 | #11647 | `fix/mcp-sse-transport` | Support SSE transport alongside Streamable HTTP | — |
 | #12207 | `fix/compound-background-subshell-leak` | Rewrite `A && B &` to prevent subshell leak in terminal | — |
@@ -37,6 +36,7 @@ Merged:
 Closed / superseded:
 - #7297 (per-platform model overrides) — superseded by #12234. Branch `feat/per-platform-model` already deleted from origin.
 - #12227 (per-source model selection, draft) — superseded by #12234. Branch `feat/per-source-model` already deleted from origin.
+- #11617 (tool-call args valid JSON) — superseded by upstream commit `3128d9fc` ("fix(context_compressor): keep tool-call arguments JSON valid when shrinking"), which introduced `_truncate_tool_call_args_json` — strictly better than the branch's sentinel-object replacement because it preserves keys/structure. Branch `fix/compressor-tool-args-valid-json` deleted from origin.
 
 ### ⚠️ Always branch off `upstream/main`, never off fork `main`
 
@@ -91,6 +91,7 @@ When upstream `main` moves:
    git checkout fix/mcp-initial-connect-retries && git rebase upstream/main
    git checkout fix/mcp-sse-transport && git rebase upstream/main
    git checkout fix/compound-background-subshell-leak && git rebase upstream/main
+   # (fix/compressor-tool-args-valid-json removed — superseded by upstream 3128d9fc)
    git checkout feat/epub-document-support && git rebase upstream/main
    git checkout feat/html-document-support && git rebase upstream/main
    git checkout feat/rehydrate-compaction-summary && git rebase upstream/main
@@ -112,7 +113,6 @@ When upstream `main` moves:
    for b in hub-adapter feat/multi-memory-provider fix/lock-sethome-after-first-use \
             feat/cron-memory-peers feat/user-unify \
             fix/bg-skill-notify fix/session-list-sort \
-            fix/compressor-tool-args-valid-json \
             fix/mcp-initial-connect-retries fix/mcp-sse-transport \
             fix/compound-background-subshell-leak \
             feat/model-routing \
