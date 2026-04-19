@@ -25,6 +25,9 @@ All targeting `NousResearch/hermes-agent` main:
 | #11647 | `fix/mcp-sse-transport` | Support SSE transport alongside Streamable HTTP | — |
 | #12207 | `fix/compound-background-subshell-leak` | Rewrite `A && B &` to prevent subshell leak in terminal | — |
 | #12234 | `feat/model-routing` | Match-based model routing via `model.routes` (subsumes per-platform + per-source) | — |
+| #12590 | `feat/epub-document-support` | Add `.epub` to `SUPPORTED_DOCUMENT_TYPES` allowlist (shared by telegram/slack/discord/feishu/whatsapp document handlers) | — |
+| #12606 | `fix/rehydrate-compaction-summary` | Rehydrate `ContextCompressor._previous_summary` from transcript on agent boot so the UPDATE-prompt compaction chain survives process restarts and agent-cache eviction | — |
+| #12686 | `fix/route-aware-background-agents` | Carry `model.routes` bundle through flush-memory and background-review spawn sites so post-turn auxiliary calls don't pair the routed `model` with the config-default `base_url` | — |
 
 Merged:
 - #6851 (telegram custom base_url). The `telegram-base-url-upstream` branch can be deleted as cleanup.
@@ -87,6 +90,9 @@ When upstream `main` moves:
    git checkout fix/mcp-initial-connect-retries && git rebase upstream/main
    git checkout fix/mcp-sse-transport && git rebase upstream/main
    git checkout fix/compound-background-subshell-leak && git rebase upstream/main
+   git checkout feat/epub-document-support && git rebase upstream/main
+   git checkout fix/rehydrate-compaction-summary && git rebase upstream/main
+   git checkout fix/route-aware-background-agents && git rebase upstream/main
    git checkout fork-only && git rebase upstream/main
    ```
 3. Rebase stacked branches onto their parent (not upstream/main):
@@ -108,6 +114,9 @@ When upstream `main` moves:
             fix/mcp-initial-connect-retries fix/mcp-sse-transport \
             fix/compound-background-subshell-leak \
             feat/model-routing \
+            feat/epub-document-support \
+            fix/rehydrate-compaction-summary \
+            fix/route-aware-background-agents \
             fork-only; do
      git merge --no-edit "$b" || break
    done
@@ -179,6 +188,36 @@ populated from the background review thread when skills are created. Drained at 
 start of `run_conversation()` as `[System: ...]` messages. Also invalidates
 `_cached_system_prompt` and the DB-stored prompt. If upstream refactors
 `_spawn_background_review` or the scan loop at ~line 2233, this branch will conflict.
+
+**#12590 (epub):** One-line addition to `SUPPORTED_DOCUMENT_TYPES` in
+`gateway/platforms/base.py`. Every platform handler (telegram, slack, discord, feishu,
+whatsapp) imports and uses this allowlist, so adding `.epub → application/epub+zip`
+there lights up epub uploads across all of them. Paired with the OCR skill's
+`marker` extractor which already supports epub.
+
+**#12606 (rehydrate-compaction-summary):** `ContextCompressor._previous_summary` is
+an in-memory field that enables the UPDATE-prompt compaction chain (preserves prior
+structured summary instead of re-summarizing from scratch). A fresh `AIAgent` — new
+gateway turn after cache eviction, process restart, session reload — always starts
+with it `None`, so the next compaction falls back to INITIAL prompt and re-blurs the
+existing `[CONTEXT COMPACTION]` marker as raw content. Fix: scan transcript newest→
+oldest for a `SUMMARY_PREFIX` (or legacy `[CONTEXT SUMMARY]:`) message, strip the
+prefix, seed `_previous_summary` with the body. Called once per turn in
+`run_conversation` right after `_hydrate_todo_store`.
+
+**#12686 (route-aware-background-agents):** When a routed turn (owner DM → slate-3 at
+a dedicated LiteLLM integration) ends, follow-up hygiene/review/flush agents were
+inheriting a *partially* routed bundle. Two bugs: (1) `_flush_memories_for_session`
+called `_resolve_session_agent_runtime(session_key=...)` without `source`, so
+`apply_route` short-circuits on empty context and the flush agent gets config
+defaults. (2) `_spawn_background_review` constructed `AIAgent(model=self.model,
+provider=self.provider)` without `base_url`/`api_key`, and `AIAgent.__init__`
+re-resolved them from `resolve_provider_client` → `_try_custom_endpoint()` → config
+default. Both paths converge on model=routed + base_url=default → 401
+`key_model_access_denied` on integration keys scoped to one model. Fix: recover
+`source` from `session_store._entries[session_key].origin` in the flush path;
+forward the full bundle (base_url, api_key, api_mode, acp_command, acp_args,
+credential_pool) at the review spawn site.
 
 ## Fork-only changes
 
