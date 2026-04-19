@@ -24,6 +24,18 @@ logger = logging.getLogger(__name__)
 
 VALID_THREAD_AUTO_ARCHIVE_MINUTES = {60, 1440, 4320, 10080}
 
+# Opt-in hook for Slate's zero-secrets Discord transport. When
+# SLATE_DG_PROXY=1, a small runtime patch redirects discord.py's REST base
+# to a per-agent reverse-proxy integration and its WebSocket to a
+# protocol-aware gateway proxy that rewrites IDENTIFY frames. The agent VM
+# holds no bot token. See hermes-provisioner docs/discord-zero-secrets-gateway.md
+# for the full design. No-op unless the env var is set.
+if os.environ.get("SLATE_DG_PROXY") == "1":
+    try:
+        from . import _slate_dg_patch  # noqa: F401
+    except Exception as _e:
+        logger.warning("SLATE_DG_PROXY=1 but dg_patch failed to load: %s", _e)
+
 try:
     import discord
     from discord import Message as DiscordMessage, Intents
