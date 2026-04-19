@@ -3611,15 +3611,17 @@ class AIAgent:
                     _parent_runtime = self._current_main_runtime()
                     review_agent = AIAgent(
                         model=self.model,
+                        acp_command=getattr(self, "acp_command", None),
+                        acp_args=getattr(self, "acp_args", None),
                         max_iterations=8,
                         quiet_mode=True,
                         platform=self.platform,
-                        provider=self.provider,
-                        api_mode=_parent_runtime.get("api_mode") or None,
+                        provider=_parent_runtime.get("provider") or self.provider,
+                        api_mode=_parent_runtime.get("api_mode", ""),
                         base_url=_parent_runtime.get("base_url") or None,
-                        api_key=_parent_runtime.get("api_key") or None,
+                        api_key=_parent_runtime.get("api_key", ""),
                         credential_pool=getattr(self, "_credential_pool", None),
-                        parent_session_id=self.session_id,
+                        parent_session_id=getattr(self, "session_id", None),
                         enabled_toolsets=["memory", "skills"],
                     )
                     review_agent._memory_write_origin = "background_review"
