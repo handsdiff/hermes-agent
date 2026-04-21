@@ -22,7 +22,6 @@ All targeting `NousResearch/hermes-agent` main:
 | #9911 | `fix/session-list-sort` | Sort session listing by last activity, not creation time | — |
 | #11646 | `fix/mcp-initial-connect-retries` | Bump MCP initial connect retries 3→6 for slow warmups | — |
 | #11647 | `fix/mcp-sse-transport` | Support SSE transport alongside Streamable HTTP | — |
-| #12207 | `fix/compound-background-subshell-leak` | Rewrite `A && B &` to prevent subshell leak in terminal | — |
 | #12234 | `feat/model-routing` | Match-based model routing via `model.routes` (subsumes per-platform + per-source) | — |
 | #12590 | `feat/epub-document-support` | Add `.epub` to `SUPPORTED_DOCUMENT_TYPES` allowlist (shared by telegram/slack/discord/feishu/whatsapp document handlers) | — |
 | #12702 | `feat/html-document-support` | Add `.html` / `.htm` to the same allowlist | — |
@@ -32,11 +31,13 @@ All targeting `NousResearch/hermes-agent` main:
 Merged:
 - #6851 (telegram custom base_url). The `telegram-base-url-upstream` branch can be deleted as cleanup.
 - #9924 (pty-job-control-hang) — cherry-picked via upstream #10584 with authorship preserved. The `fix/pty-job-control-hang` branch can be deleted as cleanup.
+- #12207 (compound-background-subshell-leak) — cherry-picked via upstream #12724 with authorship preserved (upstream commit `abfc1847`). The `fix/compound-background-subshell-leak` branch can be deleted as cleanup.
 
 Closed / superseded:
 - #7297 (per-platform model overrides) — superseded by #12234. Branch `feat/per-platform-model` already deleted from origin.
 - #12227 (per-source model selection, draft) — superseded by #12234. Branch `feat/per-source-model` already deleted from origin.
 - #11617 (tool-call args valid JSON) — superseded by upstream commit `3128d9fc` ("fix(context_compressor): keep tool-call arguments JSON valid when shrinking"), which introduced `_truncate_tool_call_args_json` — strictly better than the branch's sentinel-object replacement because it preserves keys/structure. Branch `fix/compressor-tool-args-valid-json` deleted from origin.
+- `feat/slate-dg-proxy-hook` (no PR) — abandoned prototype that built the Discord zero-secrets transport *inside* hermes-agent as an opt-in `SLATE_DG_PROXY=1` hook (adding `gateway/platforms/_slate_dg_patch.py` + a conditional import in `gateway/platforms/discord.py`). Superseded by the provisioner-side approach: `hermes-provisioner/dg_patch.py` installed into each VM's site-packages via a `.pth` file, zero hermes-agent patches required. The branch was also mis-cut off fork `main` instead of `upstream/main`, so it carries a 434-file / ~41k-line-deletion diff — unmergeable as an upstream PR. Fork main does not include it; no VM runs this code. Branch can be deleted from origin as cleanup.
 
 ### ⚠️ Always branch off `upstream/main`, never off fork `main`
 
@@ -87,11 +88,10 @@ When upstream `main` moves:
    git checkout feat/cron-memory-peers && git rebase upstream/main
    git checkout fix/bg-skill-notify && git rebase upstream/main
    git checkout fix/session-list-sort && git rebase upstream/main
-   git checkout fix/compressor-tool-args-valid-json && git rebase upstream/main
    git checkout fix/mcp-initial-connect-retries && git rebase upstream/main
    git checkout fix/mcp-sse-transport && git rebase upstream/main
-   git checkout fix/compound-background-subshell-leak && git rebase upstream/main
    # (fix/compressor-tool-args-valid-json removed — superseded by upstream 3128d9fc)
+   # (fix/compound-background-subshell-leak removed — cherry-picked via upstream #12724 as abfc1847)
    git checkout feat/epub-document-support && git rebase upstream/main
    git checkout feat/html-document-support && git rebase upstream/main
    git checkout feat/rehydrate-compaction-summary && git rebase upstream/main
@@ -114,7 +114,6 @@ When upstream `main` moves:
             feat/cron-memory-peers feat/user-unify \
             fix/bg-skill-notify fix/session-list-sort \
             fix/mcp-initial-connect-retries fix/mcp-sse-transport \
-            fix/compound-background-subshell-leak \
             feat/model-routing \
             feat/epub-document-support \
             feat/html-document-support \
