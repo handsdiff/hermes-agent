@@ -7,11 +7,19 @@ transcript so the receiving-side agent has context about what was sent.
 
 Standalone -- works from CLI, cron, and gateway contexts without needing
 the full SessionStore machinery.
+
+When no session exists for the destination channel (common for cron-
+originated outbounds to channels the agent has never received a message
+in), a minimal session record is created so the mirrored outbound
+becomes the starting point of the channel's shared transcript. Without
+this, an agent that posts to a channel from a cron would deny ever
+having made the post when asked about it there later.
 """
 
 import json
 import logging
-from datetime import datetime
+import uuid
+from datetime import datetime, timezone
 from typing import Optional
 
 from hermes_cli.config import get_hermes_home
@@ -32,17 +40,25 @@ def mirror_to_session(
     """
     Append a delivery-mirror message to the target session's transcript.
 
-    Finds the gateway session that matches the given platform + chat_id,
-    then writes a mirror entry to both the JSONL transcript and SQLite DB.
+    Finds (or creates) the gateway session that matches the given
+    platform + chat_id, then writes a mirror entry to both the JSONL
+    transcript and SQLite DB.
 
-    Returns True if mirrored successfully, False if no matching session or error.
-    All errors are caught -- this is never fatal.
+    Returns True if mirrored successfully, False on error.
+    All errors are caught — this is never fatal.
     """
     try:
         session_id = _find_session_id(platform, str(chat_id), thread_id=thread_id)
         if not session_id:
-            logger.debug("Mirror: no session found for %s:%s:%s", platform, chat_id, thread_id)
-            return False
+            session_id = _create_channel_session(
+                platform, str(chat_id), thread_id=thread_id,
+            )
+            if not session_id:
+                logger.debug(
+                    "Mirror: could not find or create session for %s:%s:%s",
+                    platform, chat_id, thread_id,
+                )
+                return False
 
         mirror_msg = {
             "role": "assistant",
@@ -61,6 +77,97 @@ def mirror_to_session(
     except Exception as e:
         logger.debug("Mirror failed for %s:%s:%s: %s", platform, chat_id, thread_id, e)
         return False
+
+
+def _create_channel_session(
+    platform: str,
+    chat_id: str,
+    thread_id: Optional[str] = None,
+) -> Optional[str]:
+    """Create a minimal session record for a channel outbound when none exists.
+
+    Writes a sessions.json entry + a row in the SQLite sessions table so
+    subsequent mirror calls and subsequent inbound messages find and
+    extend the same session. Returns the new session_id on success.
+
+    The session key mirrors ``build_session_key``'s shared-channel shape
+    (``agent:main:<platform>:group:<chat_id>[:<thread_id>]``) so an
+    incoming @mention from any user in the same channel resumes this
+    session instead of starting a fresh one.
+    """
+    try:
+        now = datetime.now(timezone.utc)
+        session_id = f"{now.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+
+        # Build a shared-channel session key.  DMs keep their chat_id-scoped
+        # shape; groups drop the per-user suffix so every participant lands
+        # on the same session (same rule as build_session_key with
+        # ``group_sessions_per_user=False``).
+        parts = ["agent:main", platform.lower(), "group", str(chat_id)]
+        if thread_id:
+            parts.append(str(thread_id))
+        session_key = ":".join(parts)
+
+        # Write sessions.json entry
+        _SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+        index = {}
+        if _SESSIONS_INDEX.exists():
+            try:
+                with open(_SESSIONS_INDEX, encoding="utf-8") as f:
+                    index = json.load(f)
+            except Exception:
+                index = {}
+
+        origin = {
+            "platform": platform.lower(),
+            "chat_id": str(chat_id),
+            "chat_type": "group",
+        }
+        if thread_id:
+            origin["thread_id"] = str(thread_id)
+
+        index[session_key] = {
+            "session_key": session_key,
+            "session_id": session_id,
+            "origin": origin,
+            "platform": platform.lower(),
+            "chat_type": "group",
+            "created_at": now.isoformat(),
+            "updated_at": now.isoformat(),
+        }
+
+        tmp = _SESSIONS_INDEX.with_suffix(".json.tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(index, f, indent=2, default=str)
+        tmp.replace(_SESSIONS_INDEX)
+
+        # Create the SQLite sessions row so append_message has a FK target
+        try:
+            from hermes_state import SessionDB
+            db = SessionDB()
+            try:
+                db.create_session(
+                    session_id=session_id,
+                    source=platform.lower(),
+                    user_id=None,
+                )
+            finally:
+                db.close()
+        except Exception as e:
+            logger.debug("Mirror create-session SQLite write failed: %s", e)
+
+        logger.debug(
+            "Mirror: created session %s for %s:%s:%s",
+            session_id, platform, chat_id, thread_id,
+        )
+        return session_id
+
+    except Exception as e:
+        logger.debug(
+            "Mirror session-create failed for %s:%s:%s: %s",
+            platform, chat_id, thread_id, e,
+        )
+        return None
 
 
 def _find_session_id(platform: str, chat_id: str, thread_id: Optional[str] = None) -> Optional[str]:
