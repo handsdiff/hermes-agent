@@ -4000,8 +4000,17 @@ class GatewayRunner:
             # is referencing. History can contain the same or similar text
             # multiple times, and without an explicit pointer the agent has to
             # guess (or answer for both subjects). Token overhead is minimal.
+            #
+            # Attribute the quote to its author when the adapter populated
+            # reply_to_author. Without this, agents seeing a quote of someone
+            # else's message can misread it as a fabricated claim attributed
+            # to them and escalate ("that quoted message isn't from me").
             reply_snippet = event.reply_to_text[:500]
-            message_text = f'[Replying to: "{reply_snippet}"]\n\n{message_text}'
+            reply_author = getattr(event, "reply_to_author", None)
+            if reply_author:
+                message_text = f'[Replying to {reply_author}: "{reply_snippet}"]\n\n{message_text}'
+            else:
+                message_text = f'[Replying to: "{reply_snippet}"]\n\n{message_text}'
 
         if "@" in message_text:
             try:
