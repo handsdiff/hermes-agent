@@ -367,12 +367,15 @@ class TestBuildSessionContextPrompt:
         # Should NOT show a specific **User:** line (would bust cache)
         assert "**User:** Alice" not in prompt
 
-    def test_non_thread_group_shows_user(self):
-        """Regular group messages (no thread) still show the user name."""
+    def test_non_thread_group_shows_user_when_per_user_isolation_enabled(self):
+        """With per-user group isolation explicitly enabled, the prompt pins
+        one user name. Default shared sessions are covered by
+        ``test_shared_non_thread_group_prompt_hides_single_user`` below."""
         config = GatewayConfig(
             platforms={
                 Platform.TELEGRAM: PlatformConfig(enabled=True, token="fake"),
             },
+            group_sessions_per_user=True,
         )
         source = SessionSource(
             platform=Platform.TELEGRAM,
@@ -763,7 +766,12 @@ class TestWhatsAppSessionKeyConsistency:
         )
         assert store._generate_session_key(source) == build_session_key(source)
 
-    def test_store_creates_distinct_group_sessions_per_user(self, store):
+    def test_store_creates_distinct_group_sessions_per_user_when_opted_in(self, store):
+        """Opt-in per-user group isolation: each user gets their own session.
+        Default (shared) behaviour is covered by
+        ``test_store_shares_group_sessions_when_disabled_in_config`` below."""
+        store.config.group_sessions_per_user = True
+
         first = SessionSource(
             platform=Platform.DISCORD,
             chat_id="guild-123",
