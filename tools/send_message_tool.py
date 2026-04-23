@@ -765,7 +765,20 @@ async def _send_discord(token, chat_id, message, thread_id=None, media_files=Non
         from gateway.platforms.base import resolve_proxy_url, proxy_kwargs_for_aiohttp
         _proxy = resolve_proxy_url(platform_env_var="DISCORD_PROXY")
         _sess_kw, _req_kw = proxy_kwargs_for_aiohttp(_proxy)
-        auth_headers = {"Authorization": f"Bot {token}"}
+        # When the bot token is a ``proxy-managed-<vm>`` placeholder, the real
+        # token lives server-side inside the per-VM dg-proxy. Route REST calls
+        # through that proxy (same rewrite dg_patch.py applies to discord.py)
+        # and strip the client-side Authorization header — the proxy injects
+        # the real ``Bot <token>`` at transport layer. Without this, raw
+        # aiohttp sends the placeholder string as the token and Discord
+        # returns 401.
+        if isinstance(token, str) and token.startswith("proxy-managed-"):
+            _dg_vm = token[len("proxy-managed-"):]
+            _api_base = f"https://discord-{_dg_vm}.int.exe.xyz/api/v10"
+            auth_headers = {}
+        else:
+            _api_base = "https://discord.com/api/v10"
+            auth_headers = {"Authorization": f"Bot {token}"}
         json_headers = {**auth_headers, "Content-Type": "application/json"}
         media_files = media_files or []
         last_data = None
@@ -773,7 +786,7 @@ async def _send_discord(token, chat_id, message, thread_id=None, media_files=Non
 
         # Thread endpoint: Discord threads are channels; send directly to the thread ID.
         if thread_id:
-            url = f"https://discord.com/api/v10/channels/{thread_id}/messages"
+            url = f"{_api_base}/channels/{thread_id}/messages"
         else:
             # Check if the target channel is a forum channel (type 15).
             # Forum channels reject POST /messages — create a thread post instead.
@@ -797,7 +810,7 @@ async def _send_discord(token, chat_id, message, thread_id=None, media_files=Non
                 else:
                     is_forum = False
                     try:
-                        info_url = f"https://discord.com/api/v10/channels/{chat_id}"
+                        info_url = f"{_api_base}/channels/{chat_id}"
                         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15), **_sess_kw) as info_sess:
                             async with info_sess.get(info_url, headers=json_headers, **_req_kw) as info_resp:
                                 if info_resp.status == 200:
@@ -809,7 +822,7 @@ async def _send_discord(token, chat_id, message, thread_id=None, media_files=Non
 
             if is_forum:
                 thread_name = _derive_forum_thread_name(message)
-                thread_url = f"https://discord.com/api/v10/channels/{chat_id}/threads"
+                thread_url = f"{_api_base}/channels/{chat_id}/threads"
 
                 # Filter to readable media files up front so we can pick the
                 # right code path (JSON vs multipart) before opening a session.
@@ -885,7 +898,7 @@ async def _send_discord(token, chat_id, message, thread_id=None, media_files=Non
                     result["warnings"] = warnings
                 return result
 
-            url = f"https://discord.com/api/v10/channels/{chat_id}/messages"
+            url = f"{_api_base}/channels/{chat_id}/messages"
 
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30), **_sess_kw) as session:
             # Send text message (skip if empty and media is present)
