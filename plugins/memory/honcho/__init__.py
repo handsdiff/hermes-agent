@@ -216,12 +216,17 @@ class HonchoMemoryProvider(MemoryProvider):
         self._reasoning_level_cap: str = "high"  # ceiling for auto-selected level
         self._last_context_turn = -999
         self._last_dialectic_turn = -999
+        self._last_context_turn_by_actor: dict[tuple[str, str, str], int] = {}
+        self._last_dialectic_turn_by_actor: dict[tuple[str, str, str], int] = {}
 
         # Liveness + observability state
         self._prefetch_thread_started_at: float = 0.0   # monotonic ts of current thread
+        self._prefetch_thread_started_at_by_actor: dict[tuple[str, str, str], float] = {}
         self._prefetch_result_fired_at: int = -999      # turn the pending result was fired at
         self._prefetch_results_by_actor: dict[tuple[str, str, str], tuple[str, int]] = {}
         self._dialectic_empty_streak: int = 0           # consecutive empty returns
+        self._dialectic_empty_streak_by_actor: dict[tuple[str, str, str], int] = {}
+        self._prefetch_threads_by_actor: dict[tuple[str, str, str], threading.Thread] = {}
 
         # Port #1957: lazy session init for tools-only mode
         self._session_initialized = False
@@ -405,6 +410,68 @@ class HonchoMemoryProvider(MemoryProvider):
             return {}
         return {"actor_context": self._turn_actor_context(actor_context)}
 
+    def _get_last_context_turn(self, actor_context: dict[str, Any] | None = None) -> int:
+        if not self._actor_runtime_enabled:
+            return self._last_context_turn
+        return self._last_context_turn_by_actor.get(self._actor_cache_key(actor_context), -999)
+
+    def _set_last_context_turn(self, value: int, actor_context: dict[str, Any] | None = None) -> None:
+        if not self._actor_runtime_enabled:
+            self._last_context_turn = value
+            return
+        self._last_context_turn_by_actor[self._actor_cache_key(actor_context)] = value
+
+    def _get_last_dialectic_turn(self, actor_context: dict[str, Any] | None = None) -> int:
+        if not self._actor_runtime_enabled:
+            return self._last_dialectic_turn
+        return self._last_dialectic_turn_by_actor.get(self._actor_cache_key(actor_context), -999)
+
+    def _set_last_dialectic_turn(self, value: int, actor_context: dict[str, Any] | None = None) -> None:
+        if not self._actor_runtime_enabled:
+            self._last_dialectic_turn = value
+            return
+        self._last_dialectic_turn_by_actor[self._actor_cache_key(actor_context)] = value
+
+    def _get_empty_streak(self, actor_context: dict[str, Any] | None = None) -> int:
+        if not self._actor_runtime_enabled:
+            return self._dialectic_empty_streak
+        return self._dialectic_empty_streak_by_actor.get(self._actor_cache_key(actor_context), 0)
+
+    def _set_empty_streak(self, value: int, actor_context: dict[str, Any] | None = None) -> None:
+        if not self._actor_runtime_enabled:
+            self._dialectic_empty_streak = value
+            return
+        self._dialectic_empty_streak_by_actor[self._actor_cache_key(actor_context)] = value
+
+    def _increment_empty_streak(self, actor_context: dict[str, Any] | None = None) -> None:
+        self._set_empty_streak(self._get_empty_streak(actor_context) + 1, actor_context)
+
+    def _get_prefetch_thread(
+        self,
+        actor_context: dict[str, Any] | None = None,
+    ) -> tuple[threading.Thread | None, float]:
+        if not self._actor_runtime_enabled:
+            return self._prefetch_thread, self._prefetch_thread_started_at
+        key = self._actor_cache_key(actor_context)
+        return (
+            self._prefetch_threads_by_actor.get(key),
+            self._prefetch_thread_started_at_by_actor.get(key, 0.0),
+        )
+
+    def _set_prefetch_thread(
+        self,
+        thread: threading.Thread,
+        started_at: float,
+        actor_context: dict[str, Any] | None = None,
+    ) -> None:
+        if not self._actor_runtime_enabled:
+            self._prefetch_thread = thread
+            self._prefetch_thread_started_at = started_at
+            return
+        key = self._actor_cache_key(actor_context)
+        self._prefetch_threads_by_actor[key] = thread
+        self._prefetch_thread_started_at_by_actor[key] = started_at
+
     def _get_base_context_cache(self, actor_context: dict[str, Any] | None = None) -> Optional[str]:
         if not self._actor_runtime_enabled:
             return self._base_context_cache
@@ -535,7 +602,7 @@ class HonchoMemoryProvider(MemoryProvider):
                     )
                 except Exception as exc:
                     logger.debug("Honcho dialectic prewarm failed: %s", exc)
-                    self._dialectic_empty_streak += 1
+                    self._increment_empty_streak(self._actor_context)
                     return
                 if r and r.strip():
                     self._store_prefetch_result(
@@ -544,16 +611,17 @@ class HonchoMemoryProvider(MemoryProvider):
                         actor_context=self._actor_context,
                     )
                     # Treat prewarm as turn 0 so cadence gating starts clean.
-                    self._last_dialectic_turn = 0
-                    self._dialectic_empty_streak = 0
+                    self._set_last_dialectic_turn(0, self._actor_context)
+                    self._set_empty_streak(0, self._actor_context)
                 else:
-                    self._dialectic_empty_streak += 1
+                    self._increment_empty_streak(self._actor_context)
 
-            self._prefetch_thread_started_at = time.monotonic()
-            self._prefetch_thread = threading.Thread(
+            _started_at = time.monotonic()
+            _thread = threading.Thread(
                 target=_prewarm_dialectic, daemon=True, name="honcho-prewarm-dialectic"
             )
-            self._prefetch_thread.start()
+            self._set_prefetch_thread(_thread, _started_at, self._actor_context)
+            _thread.start()
             logger.debug("Honcho pre-warm started for session: %s", self._session_key)
 
     def _ensure_session(self) -> bool:
@@ -720,7 +788,7 @@ class HonchoMemoryProvider(MemoryProvider):
                         self._format_first_turn_context(ctx) if ctx else "",
                         actor_context_snapshot,
                     )
-                    self._last_context_turn = self._turn_count
+                    self._set_last_context_turn(self._turn_count, actor_context_snapshot)
                 except Exception as e:
                     logger.debug("Honcho base context fetch failed: %s", e)
                     self._set_base_context_cache("", actor_context_snapshot)
@@ -757,10 +825,12 @@ class HonchoMemoryProvider(MemoryProvider):
                 if not self._actor_runtime_enabled
                 else self._actor_cache_key(actor_context_snapshot) in self._prefetch_results_by_actor
             )
-        if _prewarm_landed and self._last_dialectic_turn == -999:
-            self._last_dialectic_turn = self._turn_count
+        _last_dialectic_turn = self._get_last_dialectic_turn(actor_context_snapshot)
+        if _prewarm_landed and _last_dialectic_turn == -999:
+            self._set_last_dialectic_turn(self._turn_count, actor_context_snapshot)
+            _last_dialectic_turn = self._turn_count
 
-        if self._last_dialectic_turn == -999 and query:
+        if _last_dialectic_turn == -999 and query:
             _first_turn_timeout = (
                 self._config.timeout if self._config and self._config.timeout else 8.0
             )
@@ -774,7 +844,7 @@ class HonchoMemoryProvider(MemoryProvider):
                     )
                 except Exception as exc:
                     logger.debug("Honcho first-turn dialectic failed: %s", exc)
-                    self._dialectic_empty_streak += 1
+                    self._increment_empty_streak(actor_context_snapshot)
                     return
                 if r and r.strip():
                     self._store_prefetch_result(
@@ -784,26 +854,28 @@ class HonchoMemoryProvider(MemoryProvider):
                     )
                     # Advance cadence only on a non-empty result so the next
                     # turn retries when the call returned nothing.
-                    self._last_dialectic_turn = _fired_at
-                    self._dialectic_empty_streak = 0
+                    self._set_last_dialectic_turn(_fired_at, actor_context_snapshot)
+                    self._set_empty_streak(0, actor_context_snapshot)
                 else:
-                    self._dialectic_empty_streak += 1
+                    self._increment_empty_streak(actor_context_snapshot)
 
-            self._prefetch_thread_started_at = time.monotonic()
-            self._prefetch_thread = threading.Thread(
+            _started_at = time.monotonic()
+            _thread = threading.Thread(
                 target=_run_first_turn, daemon=True, name="honcho-prefetch-first"
             )
-            self._prefetch_thread.start()
-            self._prefetch_thread.join(timeout=_first_turn_timeout)
-            if self._prefetch_thread.is_alive():
+            self._set_prefetch_thread(_thread, _started_at, actor_context_snapshot)
+            _thread.start()
+            _thread.join(timeout=_first_turn_timeout)
+            if _thread.is_alive():
                 logger.debug(
                     "Honcho first-turn dialectic still running after %.1fs — "
                     "will surface on next turn",
                     _first_turn_timeout,
                 )
 
-        if self._prefetch_thread and self._prefetch_thread.is_alive():
-            self._prefetch_thread.join(timeout=3.0)
+        _thread, _ = self._get_prefetch_thread(actor_context_snapshot)
+        if _thread and _thread.is_alive():
+            _thread.join(timeout=3.0)
         dialectic_result, fired_at = self._pop_prefetch_result(actor_context_snapshot)
 
         # Discard stale pending results: if the fire happened more than
@@ -872,8 +944,9 @@ class HonchoMemoryProvider(MemoryProvider):
         actor_context_snapshot = self._turn_actor_context(actor_context)
 
         # ----- Context refresh (base layer) — independent cadence -----
-        if self._context_cadence <= 1 or (self._turn_count - self._last_context_turn) >= self._context_cadence:
-            self._last_context_turn = self._turn_count
+        last_context_turn = self._get_last_context_turn(actor_context_snapshot)
+        if self._context_cadence <= 1 or (self._turn_count - last_context_turn) >= self._context_cadence:
+            self._set_last_context_turn(self._turn_count, actor_context_snapshot)
             try:
                 self._manager.prefetch_context(
                     self._session_key,
@@ -887,19 +960,20 @@ class HonchoMemoryProvider(MemoryProvider):
         # Thread-alive guard with stale-thread recovery: a hung Honcho call
         # older than timeout × multiplier is treated as dead so it can't
         # block subsequent fires.
-        if self._thread_is_live():
+        if self._thread_is_live(actor_context_snapshot):
             logger.debug("Honcho dialectic prefetch skipped: prior thread still running")
             return
 
         # Cadence gate, widened by the empty-streak backoff so a persistently
         # silent backend doesn't retry every turn forever.
-        effective = self._effective_cadence()
-        if (self._turn_count - self._last_dialectic_turn) < effective:
+        effective = self._effective_cadence(actor_context_snapshot)
+        last_dialectic_turn = self._get_last_dialectic_turn(actor_context_snapshot)
+        if (self._turn_count - last_dialectic_turn) < effective:
             logger.debug(
                 "Honcho dialectic prefetch skipped: effective cadence %d "
                 "(base %d, empty streak %d), turns since last: %d",
-                effective, self._dialectic_cadence, self._dialectic_empty_streak,
-                self._turn_count - self._last_dialectic_turn,
+                effective, self._dialectic_cadence, self._get_empty_streak(actor_context_snapshot),
+                self._turn_count - last_dialectic_turn,
             )
             return
 
@@ -915,7 +989,7 @@ class HonchoMemoryProvider(MemoryProvider):
                 )
             except Exception as e:
                 logger.debug("Honcho prefetch failed: %s", e)
-                self._dialectic_empty_streak += 1
+                self._increment_empty_streak(actor_context_snapshot)
                 return
             if result and result.strip():
                 self._store_prefetch_result(
@@ -923,16 +997,17 @@ class HonchoMemoryProvider(MemoryProvider):
                     _fired_at,
                     actor_context=actor_context_snapshot,
                 )
-                self._last_dialectic_turn = _fired_at
-                self._dialectic_empty_streak = 0
+                self._set_last_dialectic_turn(_fired_at, actor_context_snapshot)
+                self._set_empty_streak(0, actor_context_snapshot)
             else:
-                self._dialectic_empty_streak += 1
+                self._increment_empty_streak(actor_context_snapshot)
 
-        self._prefetch_thread_started_at = time.monotonic()
-        self._prefetch_thread = threading.Thread(
+        _started_at = time.monotonic()
+        _thread = threading.Thread(
             target=_run, daemon=True, name="honcho-prefetch"
         )
-        self._prefetch_thread.start()
+        self._set_prefetch_thread(_thread, _started_at, actor_context_snapshot)
+        _thread.start()
 
     # ----- Dialectic depth: multi-pass .chat() with cold/warm prompts -----
 
@@ -968,13 +1043,14 @@ class HonchoMemoryProvider(MemoryProvider):
     # eventually settles on a ceiling instead of unbounded widening.
     _BACKOFF_MAX = 8
 
-    def _thread_is_live(self) -> bool:
+    def _thread_is_live(self, actor_context: dict[str, Any] | None = None) -> bool:
         """Thread-alive guard that treats threads older than the stale
         threshold as dead, so a hung Honcho request can't block new fires."""
-        if not self._prefetch_thread or not self._prefetch_thread.is_alive():
+        thread, started_at = self._get_prefetch_thread(actor_context)
+        if not thread or not thread.is_alive():
             return False
         timeout = (self._config.timeout if self._config and self._config.timeout else 8.0)
-        age = time.monotonic() - self._prefetch_thread_started_at
+        age = time.monotonic() - started_at
         if age > timeout * self._STALE_THREAD_MULTIPLIER:
             logger.debug(
                 "Honcho prefetch thread age %.1fs exceeds stale threshold "
@@ -983,11 +1059,12 @@ class HonchoMemoryProvider(MemoryProvider):
             return False
         return True
 
-    def _effective_cadence(self) -> int:
+    def _effective_cadence(self, actor_context: dict[str, Any] | None = None) -> int:
         """Cadence plus empty-streak backoff, capped at _BACKOFF_MAX × base."""
-        if self._dialectic_empty_streak <= 0:
+        empty_streak = self._get_empty_streak(actor_context)
+        if empty_streak <= 0:
             return self._dialectic_cadence
-        widened = self._dialectic_cadence + self._dialectic_empty_streak
+        widened = self._dialectic_cadence + empty_streak
         ceiling = self._dialectic_cadence * self._BACKOFF_MAX
         return min(widened, ceiling)
 
@@ -1347,7 +1424,7 @@ class HonchoMemoryProvider(MemoryProvider):
 
         In multiplayer sessions, peer scoping is a correctness boundary. A
         non-owner may access the current speaker alias and read the AI alias,
-        but explicit cross-peer targeting requires trusted/owner authority.
+        but explicit cross-peer targeting requires owner authority.
         """
         peer_value = str(peer or "user").strip() or "user"
         if not self._actor_runtime_enabled:
@@ -1357,7 +1434,7 @@ class HonchoMemoryProvider(MemoryProvider):
         is_user_alias = normalized in {"", "user"}
         is_ai_alias = normalized == "ai"
         authority = str((actor_context or {}).get("authority") or "").lower()
-        privileged = authority in {"owner", "trusted"}
+        privileged = authority == "owner"
 
         if is_user_alias:
             return "user", None
@@ -1366,7 +1443,7 @@ class HonchoMemoryProvider(MemoryProvider):
         if privileged:
             return peer_value, None
 
-        return "", "Honcho peer access denied: explicit peer targeting requires owner or trusted authority."
+        return "", "Honcho peer access denied: explicit peer targeting requires owner authority."
 
     def handle_tool_call(self, tool_name: str, args: dict, **kwargs) -> str:
         """Handle a Honcho tool call, with lazy session init for tools-only mode."""
@@ -1449,7 +1526,7 @@ class HonchoMemoryProvider(MemoryProvider):
                     **self._actor_kwargs(actor_context_snapshot),
                 )
                 # Update cadence tracker so auto-injection respects the gap after an explicit call
-                self._last_dialectic_turn = self._turn_count
+                self._set_last_dialectic_turn(self._turn_count, actor_context_snapshot)
                 return json.dumps({"result": result or "No result from Honcho."})
 
             elif tool_name == "honcho_context":
@@ -1525,7 +1602,9 @@ class HonchoMemoryProvider(MemoryProvider):
             return tool_error(f"Honcho {tool_name} failed: {e}")
 
     def shutdown(self) -> None:
-        for t in (self._prefetch_thread, self._sync_thread):
+        threads = [self._prefetch_thread, self._sync_thread]
+        threads.extend(self._prefetch_threads_by_actor.values())
+        for t in threads:
             if t and t.is_alive():
                 t.join(timeout=5.0)
         # Flush any remaining messages

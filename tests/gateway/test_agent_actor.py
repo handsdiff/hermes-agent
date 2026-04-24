@@ -207,6 +207,54 @@ def test_owner_state_packet_includes_recent_cross_session_events(tmp_path):
     db.close()
 
 
+def test_trusted_state_packet_does_not_include_unrelated_private_events(tmp_path):
+    db = SessionDB(db_path=tmp_path / "state.db")
+    private_source = SessionSource(
+        platform=Platform.DISCORD,
+        chat_id="private-dm",
+        chat_type="dm",
+        user_id="owner-1",
+        user_name="Owner",
+    )
+    record_inbound_event(
+        db,
+        source=private_source,
+        session_id="private-sid",
+        session_key="agent:main:discord:dm:private-dm",
+        text="private owner detail",
+        authority="owner",
+    )
+    group_source = SessionSource(
+        platform=Platform.DISCORD,
+        chat_id="general",
+        chat_type="group",
+        user_id="trusted-1",
+        user_name="Trusted",
+    )
+    event_id, person_id = record_inbound_event(
+        db,
+        source=group_source,
+        session_id="group-sid",
+        session_key="agent:main:discord:group:general",
+        text="what happened recently?",
+        authority="trusted",
+    )
+
+    packet = build_state_packet(
+        db,
+        source=group_source,
+        session_id="group-sid",
+        session_key="agent:main:discord:group:general",
+        inbound_event_id=event_id,
+        person_id=person_id,
+        authority="trusted",
+    )
+
+    assert "what happened recently?" in packet
+    assert "private owner detail" not in packet
+    db.close()
+
+
 def test_directive_blocks_public_cross_session_send(tmp_path):
     db = SessionDB(db_path=tmp_path / "state.db")
     source = SessionSource(
@@ -286,6 +334,43 @@ def test_cron_like_hub_inbound_blocks_public_rebroadcast(tmp_path):
         decision = evaluate_send_message_policy(
             target_platform="discord",
             target_chat_id="1495468809216327702",
+            message="Synthetic market digest",
+            db=db,
+        )
+    finally:
+        clear_session_vars(tokens)
+        db.close()
+
+    assert decision.allowed is False
+    assert decision.policy == "autonomous_public_rebroadcast_guard"
+
+
+def test_cron_like_hub_inbound_blocks_signal_group_rebroadcast(tmp_path):
+    db = SessionDB(db_path=tmp_path / "state.db")
+    event_id = db.append_agent_event(
+        event_type="inbound",
+        event_subtype="message",
+        status="received",
+        session_key="agent:main:hub:dm:hub:speculator",
+        source="hub",
+        platform="hub",
+        platform_chat_id="hub:speculator",
+        content="Cronjob Response: synthetic market digest",
+    )
+    tokens = set_session_vars(
+        platform="hub",
+        chat_id="hub:speculator",
+        chat_type="dm",
+        user_id="speculator",
+        user_name="speculator",
+        session_key="agent:main:hub:dm:hub:speculator",
+        agent_event_id=event_id,
+        person_id="hub:speculator",
+    )
+    try:
+        decision = evaluate_send_message_policy(
+            target_platform="signal",
+            target_chat_id="signal-group",
             message="Synthetic market digest",
             db=db,
         )

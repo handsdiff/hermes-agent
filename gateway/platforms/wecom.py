@@ -560,7 +560,7 @@ class WeComAdapter(BasePlatformAdapter):
         from gateway.session import build_session_key
         return build_session_key(
             event.source,
-            group_sessions_per_user=self.config.extra.get("group_sessions_per_user", True),
+            group_sessions_per_user=self.config.extra.get("group_sessions_per_user", False),
             thread_sessions_per_user=self.config.extra.get("thread_sessions_per_user", False),
         )
 

@@ -709,6 +709,9 @@ class APIServerAdapter(BasePlatformAdapter):
         tool_progress_callback=None,
         tool_start_callback=None,
         tool_complete_callback=None,
+        actor_context: Optional[Dict[str, Any]] = None,
+        gateway_session_key: Optional[str] = None,
+        source_context: Optional[Dict[str, Any]] = None,
     ) -> Any:
         """
         Create an AIAgent instance using the gateway's runtime config.
@@ -734,6 +737,8 @@ class APIServerAdapter(BasePlatformAdapter):
         # same fallback behaviour as Telegram/Discord/Slack (fixes #4954).
         from gateway.run import GatewayRunner
         fallback_model = GatewayRunner._load_fallback_model()
+        source_context = source_context or {}
+        platform = str(source_context.get("platform") or "api_server")
 
         agent = AIAgent(
             model=model,
@@ -744,7 +749,15 @@ class APIServerAdapter(BasePlatformAdapter):
             ephemeral_system_prompt=ephemeral_system_prompt or None,
             enabled_toolsets=enabled_toolsets,
             session_id=session_id,
-            platform="api_server",
+            platform=platform,
+            user_id=source_context.get("user_id") or None,
+            user_name=source_context.get("user_name") or None,
+            chat_id=source_context.get("chat_id") or None,
+            chat_name=source_context.get("chat_name") or None,
+            chat_type=source_context.get("chat_type") or None,
+            thread_id=source_context.get("thread_id") or None,
+            gateway_session_key=gateway_session_key or None,
+            actor_context=actor_context or {},
             stream_delta_callback=stream_delta_callback,
             tool_progress_callback=tool_progress_callback,
             tool_start_callback=tool_start_callback,
@@ -815,6 +828,22 @@ class APIServerAdapter(BasePlatformAdapter):
             body = await request.json()
         except (json.JSONDecodeError, Exception):
             return web.json_response(_openai_error("Invalid JSON in request body"), status=400)
+
+        hermes_ext = body.get("hermes") if isinstance(body.get("hermes"), dict) else {}
+        hermes_actor_context = (
+            hermes_ext.get("actor_context")
+            if isinstance(hermes_ext.get("actor_context"), dict)
+            else {}
+        )
+        hermes_source_context = (
+            hermes_ext.get("source")
+            if isinstance(hermes_ext.get("source"), dict)
+            else {}
+        )
+        hermes_session_key = str(hermes_ext.get("session_key") or "").strip()
+        hermes_ephemeral_user_context = str(
+            hermes_ext.get("ephemeral_user_context") or ""
+        ).strip()
 
         messages = body.get("messages")
         if not messages or not isinstance(messages, list):
@@ -966,10 +995,14 @@ class APIServerAdapter(BasePlatformAdapter):
                 user_message=user_message,
                 conversation_history=history,
                 ephemeral_system_prompt=system_prompt,
+                ephemeral_user_context=hermes_ephemeral_user_context,
                 session_id=session_id,
                 stream_delta_callback=_on_delta,
                 tool_progress_callback=_on_tool_progress,
                 agent_ref=agent_ref,
+                actor_context=hermes_actor_context,
+                gateway_session_key=hermes_session_key,
+                source_context=hermes_source_context,
             ))
 
             return await self._write_sse_chat_completion(
@@ -983,7 +1016,11 @@ class APIServerAdapter(BasePlatformAdapter):
                 user_message=user_message,
                 conversation_history=history,
                 ephemeral_system_prompt=system_prompt,
+                ephemeral_user_context=hermes_ephemeral_user_context,
                 session_id=session_id,
+                actor_context=hermes_actor_context,
+                gateway_session_key=hermes_session_key,
+                source_context=hermes_source_context,
             )
 
         idempotency_key = request.headers.get("Idempotency-Key")
@@ -2163,12 +2200,16 @@ class APIServerAdapter(BasePlatformAdapter):
         user_message: str,
         conversation_history: List[Dict[str, str]],
         ephemeral_system_prompt: Optional[str] = None,
+        ephemeral_user_context: Optional[str] = None,
         session_id: Optional[str] = None,
         stream_delta_callback=None,
         tool_progress_callback=None,
         tool_start_callback=None,
         tool_complete_callback=None,
         agent_ref: Optional[list] = None,
+        actor_context: Optional[Dict[str, Any]] = None,
+        gateway_session_key: Optional[str] = None,
+        source_context: Optional[Dict[str, Any]] = None,
     ) -> tuple:
         """
         Create an agent and run a conversation in a thread executor.
@@ -2191,6 +2232,9 @@ class APIServerAdapter(BasePlatformAdapter):
                 tool_progress_callback=tool_progress_callback,
                 tool_start_callback=tool_start_callback,
                 tool_complete_callback=tool_complete_callback,
+                actor_context=actor_context,
+                gateway_session_key=gateway_session_key,
+                source_context=source_context,
             )
             if agent_ref is not None:
                 agent_ref[0] = agent
@@ -2198,6 +2242,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 user_message=user_message,
                 conversation_history=conversation_history,
                 task_id="default",
+                ephemeral_user_context=ephemeral_user_context,
             )
             usage = {
                 "input_tokens": getattr(agent, "session_prompt_tokens", 0) or 0,

@@ -531,7 +531,7 @@ class SessionEntry:
 def is_shared_multi_user_session(
     source: SessionSource,
     *,
-    group_sessions_per_user: bool = True,
+    group_sessions_per_user: bool = False,
     thread_sessions_per_user: bool = False,
 ) -> bool:
     """Return True when a non-DM session is shared across participants.
@@ -540,7 +540,7 @@ def is_shared_multi_user_session(
       - DMs are never shared.
       - Threads are shared unless ``thread_sessions_per_user`` is True.
       - Non-thread group/channel sessions are shared unless
-        ``group_sessions_per_user`` is True (default: True = isolated).
+        ``group_sessions_per_user`` is True.
     """
     if source.chat_type == "dm":
         return False
@@ -551,7 +551,7 @@ def is_shared_multi_user_session(
 
 def build_session_key(
     source: SessionSource,
-    group_sessions_per_user: bool = True,
+    group_sessions_per_user: bool = False,
     thread_sessions_per_user: bool = False,
 ) -> str:
     """Build a deterministic session key from a message source.
@@ -595,12 +595,9 @@ def build_session_key(
     if source.thread_id:
         key_parts.append(source.thread_id)
 
-    # In threads, default to shared sessions (all participants see the same
-    # conversation).  Per-user isolation only applies when explicitly enabled
-    # via thread_sessions_per_user, or when there is no thread (regular group).
-    isolate_user = group_sessions_per_user
-    if source.thread_id and not thread_sessions_per_user:
-        isolate_user = False
+    # In threads, use the thread-specific isolation flag.  For non-thread
+    # groups/channels, use the group-level flag.
+    isolate_user = thread_sessions_per_user if source.thread_id else group_sessions_per_user
 
     if isolate_user and participant_id:
         key_parts.append(str(participant_id))
@@ -688,7 +685,7 @@ class SessionStore:
         """Generate a session key from a source."""
         return build_session_key(
             source,
-            group_sessions_per_user=getattr(self.config, "group_sessions_per_user", True),
+            group_sessions_per_user=getattr(self.config, "group_sessions_per_user", False),
             thread_sessions_per_user=getattr(self.config, "thread_sessions_per_user", False),
         )
     
@@ -1327,7 +1324,7 @@ def build_session_context(
         home_channels=home_channels,
         shared_multi_user_session=is_shared_multi_user_session(
             source,
-            group_sessions_per_user=getattr(config, "group_sessions_per_user", True),
+            group_sessions_per_user=getattr(config, "group_sessions_per_user", False),
             thread_sessions_per_user=getattr(config, "thread_sessions_per_user", False),
         ),
     )

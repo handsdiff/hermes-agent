@@ -440,7 +440,7 @@ class GatewayConfig:
             sessions_dir=sessions_dir,
             always_log_local=data.get("always_log_local", True),
             stt_enabled=_coerce_bool(stt_enabled, True),
-            group_sessions_per_user=_coerce_bool(group_sessions_per_user, True),
+            group_sessions_per_user=_coerce_bool(group_sessions_per_user, False),
             thread_sessions_per_user=_coerce_bool(thread_sessions_per_user, False),
             unauthorized_dm_behavior=unauthorized_dm_behavior,
             streaming=StreamingConfig.from_dict(data.get("streaming", {})),

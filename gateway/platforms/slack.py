@@ -1634,7 +1634,7 @@ class SlackAdapter(BasePlatformAdapter):
 
             # Read session isolation settings from the store's config
             store_cfg = getattr(session_store, "config", None)
-            gspu = getattr(store_cfg, "group_sessions_per_user", True) if store_cfg else True
+            gspu = getattr(store_cfg, "group_sessions_per_user", False) if store_cfg else False
             tspu = getattr(store_cfg, "thread_sessions_per_user", False) if store_cfg else False
 
             session_key = build_session_key(

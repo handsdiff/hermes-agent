@@ -744,7 +744,7 @@ class TestWhatsAppDMSessionKeyConsistency:
         key = build_session_key(source)
         assert key == "agent:main:discord:group:guild-123"
 
-    def test_group_sessions_are_isolated_per_user_when_user_id_present(self):
+    def test_group_sessions_are_shared_by_default_when_user_id_present(self):
         first = SessionSource(
             platform=Platform.DISCORD,
             chat_id="guild-123",
@@ -758,9 +758,9 @@ class TestWhatsAppDMSessionKeyConsistency:
             user_id="bob",
         )
 
-        assert build_session_key(first) == "agent:main:discord:group:guild-123:alice"
-        assert build_session_key(second) == "agent:main:discord:group:guild-123:bob"
-        assert build_session_key(first) != build_session_key(second)
+        assert build_session_key(first) == "agent:main:discord:group:guild-123"
+        assert build_session_key(second) == "agent:main:discord:group:guild-123"
+        assert build_session_key(first) == build_session_key(second)
 
     def test_group_sessions_can_be_shared_when_isolation_disabled(self):
         first = SessionSource(
@@ -822,8 +822,8 @@ class TestWhatsAppDMSessionKeyConsistency:
         key = build_session_key(source, thread_sessions_per_user=True)
         assert key == "agent:main:telegram:group:-1002285219667:17585:42"
 
-    def test_non_thread_group_sessions_still_isolated_per_user(self):
-        """Regular group messages (no thread_id) remain per-user by default."""
+    def test_non_thread_group_sessions_are_shared_by_default(self):
+        """Regular group messages (no thread_id) share a session by default."""
         alice = SessionSource(
             platform=Platform.TELEGRAM,
             chat_id="-1002285219667",
@@ -836,9 +836,9 @@ class TestWhatsAppDMSessionKeyConsistency:
             chat_type="group",
             user_id="bob",
         )
-        assert build_session_key(alice) == "agent:main:telegram:group:-1002285219667:alice"
-        assert build_session_key(bob) == "agent:main:telegram:group:-1002285219667:bob"
-        assert build_session_key(alice) != build_session_key(bob)
+        assert build_session_key(alice) == "agent:main:telegram:group:-1002285219667"
+        assert build_session_key(bob) == "agent:main:telegram:group:-1002285219667"
+        assert build_session_key(alice) == build_session_key(bob)
 
     def test_discord_thread_sessions_shared_by_default(self):
         """Discord threads are shared across participants by default."""

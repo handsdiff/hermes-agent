@@ -1062,7 +1062,7 @@ class GatewayRunner:
         config = getattr(self, "config", None)
         return build_session_key(
             source,
-            group_sessions_per_user=getattr(config, "group_sessions_per_user", True),
+            group_sessions_per_user=getattr(config, "group_sessions_per_user", False),
             thread_sessions_per_user=getattr(config, "thread_sessions_per_user", False),
         )
 
@@ -4073,7 +4073,7 @@ class GatewayRunner:
 
         _is_shared_multi_user = is_shared_multi_user_session(
             source,
-            group_sessions_per_user=getattr(self.config, "group_sessions_per_user", True),
+            group_sessions_per_user=getattr(self.config, "group_sessions_per_user", False),
             thread_sessions_per_user=getattr(self.config, "thread_sessions_per_user", False),
         )
         if _is_shared_multi_user and source.user_name:
@@ -6840,6 +6840,14 @@ class GatewayRunner:
                 [str(hc.chat_id) for p in Platform
                  if (hc := self.config.get_home_channel(p))]
             ) if _is_owner else []
+            try:
+                from gateway.agent_actor import build_honcho_actor_context, infer_platform_authority
+                _background_actor_context = build_honcho_actor_context(
+                    source,
+                    authority=infer_platform_authority(source),
+                )
+            except Exception:
+                _background_actor_context = {}
 
             def run_sync():
                 agent = AIAgent(
@@ -6866,6 +6874,7 @@ class GatewayRunner:
                     chat_name=source.chat_name,
                     chat_type=source.chat_type,
                     thread_id=source.thread_id,
+                    actor_context=_background_actor_context,
                     legacy_peer_ids=_legacy_peers,
                     session_db=self._session_db,
                     fallback_model=self._fallback_model,
@@ -9334,6 +9343,7 @@ class GatewayRunner:
         run_generation: Optional[int] = None,
         event_message_id: Optional[str] = None,
         ephemeral_user_context: Optional[str] = None,
+        actor_context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Forward the message to a remote Hermes API server instead of
         running a local AIAgent.
@@ -9395,10 +9405,7 @@ class GatewayRunner:
             if role in ("user", "assistant") and content:
                 api_messages.append({"role": role, "content": content})
 
-        current_message = message
-        if ephemeral_user_context:
-            current_message = f"{ephemeral_user_context.strip()}\n\n{message}"
-        api_messages.append({"role": "user", "content": current_message})
+        api_messages.append({"role": "user", "content": message})
 
         # HTTP headers ---------------------------------------------------
         headers: Dict[str, str] = {"Content-Type": "application/json"}
@@ -9407,10 +9414,26 @@ class GatewayRunner:
         if session_id:
             headers["X-Hermes-Session-Id"] = session_id
 
+        platform_key = _platform_config_key(source.platform)
         body = {
             "model": "hermes-agent",
             "messages": api_messages,
             "stream": True,
+            "hermes": {
+                "source": {
+                    "platform": platform_key,
+                    "user_id": source.user_id,
+                    "user_id_alt": source.user_id_alt,
+                    "user_name": source.user_name,
+                    "chat_id": source.chat_id,
+                    "chat_name": source.chat_name,
+                    "chat_type": source.chat_type,
+                    "thread_id": source.thread_id,
+                },
+                "session_key": session_key,
+                "actor_context": actor_context or {},
+                "ephemeral_user_context": ephemeral_user_context or "",
+            },
         }
 
         # Set up platform streaming if available -------------------------
@@ -9420,7 +9443,6 @@ class GatewayRunner:
             from gateway.config import StreamingConfig
             _scfg = StreamingConfig()
 
-        platform_key = _platform_config_key(source.platform)
         user_config = _load_gateway_config()
         from gateway.display_config import resolve_display_setting
         _plat_streaming = resolve_display_setting(
@@ -9642,6 +9664,7 @@ class GatewayRunner:
                 session_key=session_key,
                 run_generation=run_generation,
                 event_message_id=event_message_id,
+                actor_context=actor_context,
             )
 
         from run_agent import AIAgent

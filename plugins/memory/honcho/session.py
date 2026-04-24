@@ -793,8 +793,8 @@ class HonchoSessionManager:
                     target_user_peer_id,
                     target=target_user_peer_id,
                 )
-                result["representation"] = user_ctx["representation"]
-                result["card"] = "\n".join(user_ctx["card"])
+            result["representation"] = user_ctx["representation"]
+            result["card"] = "\n".join(user_ctx["card"])
             if getattr(self, "_actor_runtime_enabled", False):
                 result["actor_peer_id"] = target_user_peer_id
                 ctx = actor_context if actor_context is not None else (self._actor_context or {})

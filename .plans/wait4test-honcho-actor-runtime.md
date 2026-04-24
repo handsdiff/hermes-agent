@@ -69,3 +69,39 @@ Adversarial local coverage now includes:
 - Stable alternate user-id actor mapping.
 
 Focused local hardening suite: `335 passed, 3 warnings`.
+
+## Second Review Hardening Loop
+
+Two independent follow-up reviews found additional blockers:
+
+- Actor-runtime retrieval fetched the active speaker through the assistant perspective but did not copy that representation/card into the injected context.
+- Proxy-mode and `/background` agent execution did not carry actor context into the actual `AIAgent`.
+- Actor-scoped caches still shared global cadence/thread state, so one speaker could suppress another speaker's refresh.
+- `trusted` users were still treated as cross-peer Honcho memory admins.
+- Trusted state packets could see global recent runtime events.
+- Some group-session defaults still silently fell back to per-user isolation.
+
+Fixes shipped:
+
+- `HonchoSessionManager.get_prefetch_context()` now always returns the active actor representation/card, including assistant-perspective reads.
+- Honcho context/dialectic cadence, empty-streak backoff, and prefetch threads are actor-scoped under actor runtime.
+- Explicit Honcho peer targeting now requires owner authority; trusted users can use the current `user` alias and read `ai`, but cannot target/write arbitrary peers.
+- Gateway proxy requests now send Hermes metadata (`source`, `session_key`, `actor_context`, ephemeral runtime context) separately from the user message; the API server forwards that into `AIAgent`.
+- `/background` tasks build and pass Honcho actor context.
+- Only owners receive global recent runtime events. Trusted/non-owner packets are limited to current session/person scope.
+- Shared group-session defaults are consistent across config loading, direct session-key helpers, session context, and adapter batching.
+- Public/autonomous rebroadcast guard now covers Signal, WhatsApp, BlueBubbles, SMS, and email targets in addition to the existing public platforms.
+
+Additional local coverage:
+
+- Actor-runtime retrieval includes Bob's current-speaker representation/card.
+- Alice/Bob queued prefetch cadence is independent in one shared session.
+- Trusted non-owner explicit peer writes are denied.
+- Trusted state packets do not include unrelated private DM event previews.
+- Proxy mode preserves actor context without persisting runtime state into the user message.
+- API server forwards Hermes actor metadata into `AIAgent`.
+- Minimal config and direct helper defaults keep group sessions shared.
+- Hub/cron rebroadcasts into Signal group targets are blocked.
+
+Focused local suite after second hardening: `472 passed, 3 warnings`.
+`tests/gateway -x` was also probed; the first failure was an existing environment-sensitive VM cleanup assertion in `test_agent_cache.py`, not this change path.

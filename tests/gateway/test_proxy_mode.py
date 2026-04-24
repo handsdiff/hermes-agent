@@ -172,11 +172,15 @@ class TestRunAgentProxyDispatch:
             session_id="test-session-123",
             session_key="test-key",
             run_generation=7,
+            actor_context={"peer_id": "human_matrix_user"},
         )
 
         assert result["final_response"] == "Hello from remote!"
         runner._run_agent_via_proxy.assert_called_once()
         assert runner._run_agent_via_proxy.call_args.kwargs["run_generation"] == 7
+        assert runner._run_agent_via_proxy.call_args.kwargs["actor_context"] == {
+            "peer_id": "human_matrix_user"
+        }
 
     @pytest.mark.asyncio
     async def test_run_agent_skips_proxy_when_not_configured(self, monkeypatch):
@@ -226,12 +230,19 @@ class TestRunAgentViaProxy:
                     result = await runner._run_agent_via_proxy(
                         message="How are you?",
                         context_prompt="You are helpful.",
+                        ephemeral_user_context="## Agent Runtime State\nprivate state",
                         history=[
                             {"role": "user", "content": "Hello"},
                             {"role": "assistant", "content": "Hi there!"},
                         ],
                         source=source,
                         session_id="session-abc",
+                        session_key="agent:main:matrix:group:!room:server.org",
+                        actor_context={
+                            "peer_id": "human_matrix_user",
+                            "agent_peer_id": "agent_wait4test",
+                            "authority": "user",
+                        },
                     )
 
         # Verify request URL
@@ -249,6 +260,11 @@ class TestRunAgentViaProxy:
         assert messages[1] == {"role": "user", "content": "Hello"}
         assert messages[2] == {"role": "assistant", "content": "Hi there!"}
         assert messages[3] == {"role": "user", "content": "How are you?"}
+        assert "private state" not in messages[3]["content"]
+        assert session.captured_json["hermes"]["session_key"] == "agent:main:matrix:group:!room:server.org"
+        assert session.captured_json["hermes"]["actor_context"]["peer_id"] == "human_matrix_user"
+        assert session.captured_json["hermes"]["source"]["platform"] == "matrix"
+        assert "private state" in session.captured_json["hermes"]["ephemeral_user_context"]
 
         # Verify streaming is requested
         assert session.captured_json["stream"] is True

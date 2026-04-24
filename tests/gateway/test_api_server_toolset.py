@@ -99,6 +99,44 @@ class TestApiServerAdapterToolset:
             assert call_kwargs.kwargs.get("platform") == "api_server"
 
     @patch("gateway.platforms.api_server.AIOHTTP_AVAILABLE", True)
+    def test_create_agent_forwards_hermes_actor_metadata(self):
+        """Proxy-originated API calls keep gateway actor identity for memory attribution."""
+        from gateway.platforms.api_server import APIServerAdapter
+        from gateway.config import PlatformConfig
+
+        adapter = APIServerAdapter(PlatformConfig())
+
+        with patch("gateway.run._resolve_runtime_agent_kwargs") as mock_kwargs, \
+             patch("gateway.run._resolve_gateway_model") as mock_model, \
+             patch("gateway.run._load_gateway_config") as mock_config, \
+             patch("run_agent.AIAgent") as mock_agent_cls:
+
+            mock_kwargs.return_value = {"api_key": "test-key", "base_url": None,
+                                        "provider": None, "api_mode": None,
+                                        "command": None, "args": []}
+            mock_model.return_value = "test/model"
+            mock_config.return_value = {}
+            mock_agent_cls.return_value = MagicMock()
+
+            adapter._create_agent(
+                actor_context={"peer_id": "human_discord_alice"},
+                gateway_session_key="agent:main:discord:group:general",
+                source_context={
+                    "platform": "discord",
+                    "user_id": "alice",
+                    "user_name": "Alice",
+                    "chat_id": "general",
+                    "chat_type": "group",
+                },
+            )
+
+            call_kwargs = mock_agent_cls.call_args.kwargs
+            assert call_kwargs["platform"] == "discord"
+            assert call_kwargs["user_id"] == "alice"
+            assert call_kwargs["gateway_session_key"] == "agent:main:discord:group:general"
+            assert call_kwargs["actor_context"] == {"peer_id": "human_discord_alice"}
+
+    @patch("gateway.platforms.api_server.AIOHTTP_AVAILABLE", True)
     def test_create_agent_respects_config_override(self):
         """User can override API server toolsets via platform_toolsets in config.yaml."""
         from gateway.platforms.api_server import APIServerAdapter

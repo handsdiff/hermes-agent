@@ -459,6 +459,30 @@ class TestActorRuntimePeers:
 
         assert mgr._resolve_peer_id(session, "user") == "owner"
 
+    def test_prefetch_context_includes_actor_representation_from_assistant_perspective(self):
+        mgr, session, _remote = self._make_manager_and_session()
+        mgr._ai_observe_others = True
+
+        def fetch(peer_id, target=None, search_query=None):
+            return {
+                "representation": f"observer={peer_id} target={target}",
+                "card": [f"card for {target}"],
+            }
+
+        mgr._fetch_peer_context = fetch
+        actor_context = {
+            "peer_id": "human_discord_bob",
+            "peer_kind": "human",
+            "display_name": "Bob",
+            "agent_peer_id": "agent_wait4test",
+        }
+
+        ctx = mgr.get_prefetch_context(session.key, actor_context=actor_context)
+
+        assert ctx["actor_peer_id"] == "human_discord_bob"
+        assert ctx["representation"] == "observer=agent_wait4test target=human_discord_bob"
+        assert ctx["card"] == "card for human_discord_bob"
+
 
 class TestActorRuntimeIsolation:
     def _provider(self):
@@ -594,6 +618,54 @@ class TestActorRuntimeIsolation:
             peer="human_discord_alice",
             actor_context=actor_context,
         )
+
+    def test_trusted_non_owner_cannot_target_explicit_peer_with_tool(self):
+        provider = self._provider()
+        provider._manager = MagicMock()
+
+        result = json.loads(provider.handle_tool_call(
+            "honcho_conclude",
+            {"conclusion": "Alice prefers private updates", "peer": "human_discord_alice"},
+            actor_context={
+                "peer_id": "human_discord_bob",
+                "agent_peer_id": "agent_wait4test",
+                "authority": "trusted",
+            },
+        ))
+
+        assert "denied" in result["error"]
+        provider._manager.create_conclusion.assert_not_called()
+
+    def test_queue_prefetch_cadence_is_scoped_by_actor(self):
+        provider = self._provider()
+        provider._turn_count = 10
+        provider._context_cadence = 100
+        provider._dialectic_cadence = 100
+        calls = []
+
+        class Manager:
+            def current_actor_peer_id(self, session=None, actor_context=None):
+                return actor_context["peer_id"]
+
+            def prefetch_context(self, *args, **kwargs):
+                return None
+
+        provider._manager = Manager()
+
+        def run_dialectic(query, *, actor_context=None):
+            calls.append(actor_context["peer_id"])
+            return f"{actor_context['peer_id']} memory"
+
+        provider._run_dialectic_depth = run_dialectic
+        alice = {"peer_id": "human_discord_alice", "agent_peer_id": "agent_wait4test"}
+        bob = {"peer_id": "human_discord_bob", "agent_peer_id": "agent_wait4test"}
+
+        provider.queue_prefetch("relationship update", actor_context=alice)
+        provider.queue_prefetch("relationship update", actor_context=bob)
+        for thread in list(provider._prefetch_threads_by_actor.values()):
+            thread.join(timeout=2)
+
+        assert set(calls) == {"human_discord_alice", "human_discord_bob"}
 
 
 class TestConcludeToolDispatch:

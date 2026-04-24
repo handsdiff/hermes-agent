@@ -142,6 +142,12 @@ class TestSessionResetPolicy:
 
 
 class TestGatewayConfigRoundtrip:
+    def test_from_dict_defaults_group_sessions_to_shared(self):
+        restored = GatewayConfig.from_dict({})
+
+        assert restored.group_sessions_per_user is False
+        assert restored.thread_sessions_per_user is False
+
     def test_full_roundtrip(self):
         config = GatewayConfig(
             platforms={
@@ -207,6 +213,18 @@ class TestLoadGatewayConfig:
         hermes_home.mkdir()
         config_path = hermes_home / "config.yaml"
         config_path.write_text("group_sessions_per_user: false\n", encoding="utf-8")
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        config = load_gateway_config()
+
+        assert config.group_sessions_per_user is False
+
+    def test_group_sessions_per_user_defaults_to_false_with_minimal_yaml(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        config_path = hermes_home / "config.yaml"
+        config_path.write_text("{}\n", encoding="utf-8")
 
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
 

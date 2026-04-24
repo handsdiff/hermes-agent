@@ -17,9 +17,14 @@ from gateway.session_context import get_session_env
 
 
 _PUBLIC_PLATFORM_NAMES = {
+    "bluebubbles",
     "discord",
+    "email",
     "slack",
+    "signal",
+    "sms",
     "telegram",
+    "whatsapp",
     "matrix",
     "mattermost",
     "feishu",
@@ -398,7 +403,7 @@ def _format_runtime_event_line(event: Dict[str, Any]) -> str:
 
 
 def _visible_recent_events(db, *, authority: str, session_key: str, person_id: str) -> list[Dict[str, Any]]:
-    if authority in {"owner", "trusted"}:
+    if authority == "owner":
         return db.list_recent_agent_events(limit=8)
     events = db.list_recent_agent_events(session_key=session_key, limit=5)
     if person_id:
