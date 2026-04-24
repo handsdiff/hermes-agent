@@ -5814,10 +5814,10 @@ class GatewayRunner:
         inbound_event_id = ""
         inbound_person_id = ""
         inbound_authority = ""
+        actor_state_packet = ""
         if self._session_db is not None:
             try:
                 from gateway.agent_actor import (
-                    build_state_packet,
                     infer_platform_authority,
                     maybe_record_directive_from_inbound,
                     record_inbound_event,
@@ -5868,7 +5868,7 @@ class GatewayRunner:
             try:
                 from gateway.agent_actor import build_state_packet
 
-                context_prompt += "\n\n" + build_state_packet(
+                actor_state_packet = build_state_packet(
                     self._session_db,
                     source=source,
                     session_id=session_entry.session_id,
@@ -5876,7 +5876,7 @@ class GatewayRunner:
                     inbound_event_id=inbound_event_id,
                     person_id=inbound_person_id,
                     authority=inbound_authority,
-                )
+                ).strip()
             except Exception as _actor_exc:
                 logger.debug("Agent actor state packet failed: %s", _actor_exc)
         
@@ -6378,6 +6378,7 @@ class GatewayRunner:
             agent_result = await self._run_agent(
                 message=message_text,
                 context_prompt=context_prompt,
+                ephemeral_user_context=actor_state_packet or None,
                 history=history,
                 source=source,
                 session_id=session_entry.session_id,
@@ -11797,6 +11798,7 @@ class GatewayRunner:
         session_key: str = None,
         run_generation: Optional[int] = None,
         event_message_id: Optional[str] = None,
+        ephemeral_user_context: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Forward the message to a remote Hermes API server instead of
         running a local AIAgent.
@@ -11858,7 +11860,10 @@ class GatewayRunner:
             if role in ("user", "assistant") and content:
                 api_messages.append({"role": role, "content": content})
 
-        api_messages.append({"role": "user", "content": message})
+        current_message = message
+        if ephemeral_user_context:
+            current_message = f"{ephemeral_user_context.strip()}\n\n{message}"
+        api_messages.append({"role": "user", "content": current_message})
 
         # HTTP headers ---------------------------------------------------
         headers: Dict[str, str] = {"Content-Type": "application/json"}
@@ -12085,6 +12090,7 @@ class GatewayRunner:
         _interrupt_depth: int = 0,
         event_message_id: Optional[str] = None,
         channel_prompt: Optional[str] = None,
+        ephemeral_user_context: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Run the agent with the given message and context.
@@ -12103,6 +12109,7 @@ class GatewayRunner:
             return await self._run_agent_via_proxy(
                 message=message,
                 context_prompt=context_prompt,
+                ephemeral_user_context=ephemeral_user_context,
                 history=history,
                 source=source,
                 session_id=session_id,
@@ -13124,7 +13131,13 @@ class GatewayRunner:
                 else:
                     _run_message = message
 
-                result = agent.run_conversation(_run_message, conversation_history=agent_history, task_id=session_id)
+                run_kwargs = {
+                    "conversation_history": agent_history,
+                    "task_id": session_id,
+                }
+                if ephemeral_user_context:
+                    run_kwargs["ephemeral_user_context"] = ephemeral_user_context
+                result = agent.run_conversation(_run_message, **run_kwargs)
             finally:
                 unregister_gateway_notify(_approval_session_key)
                 reset_current_session_key(_approval_session_token)
