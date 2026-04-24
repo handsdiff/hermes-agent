@@ -23,6 +23,8 @@ All targeting `NousResearch/hermes-agent` main:
 | #11646 | `fix/mcp-initial-connect-retries` | Bump MCP initial connect retries 3→6 for slow warmups | — |
 | #11647 | `fix/mcp-sse-transport` | Support SSE transport alongside Streamable HTTP | — |
 | #12234 | `feat/model-routing` | Match-based model routing via `model.routes` (subsumes per-platform + per-source) | — |
+| #14883 | `feat/routing-context-user-id` | Expose trusted-platform `user_id` in the `model.routes` routing context | #12234 |
+| #14884 | `feat/agent-actor-runtime-stacked` | Actor/runtime state layer, `self_state`, owner authority, and outbound policy gates | #12234, #14883 |
 | #12590 | `feat/epub-document-support` | Add `.epub` to `SUPPORTED_DOCUMENT_TYPES` allowlist (shared by telegram/slack/discord/feishu/whatsapp document handlers) | — |
 | #12702 | `feat/html-document-support` | Add `.html` / `.htm` to the same allowlist | — |
 | #12606 | `feat/rehydrate-compaction-summary` | Rehydrate `ContextCompressor._previous_summary` from transcript on agent boot so the UPDATE-prompt compaction chain survives process restarts and agent-cache eviction | — |
@@ -62,11 +64,25 @@ git checkout -b my-feature main
 it depends on peer-plan's Change 0 (unconditional `user_id` override). When rebasing,
 rebase `feat/cron-memory-peers` first, then rebase `feat/user-unify` onto it.
 
+`feat/routing-context-user-id` is branched off `feat/model-routing` because it adds
+trusted-platform `user_id` to the routing context produced for `model.routes`. Rebase
+`feat/model-routing` first, then rebase `feat/routing-context-user-id` onto it.
+
+`feat/agent-actor-runtime-stacked` is branched off `feat/routing-context-user-id`.
+Rebase the routing stack first, then rebase `feat/agent-actor-runtime-stacked` onto
+`feat/routing-context-user-id`.
+
 ## Fork main structure
 
 Fork `main` = upstream `main` + all open-PR branches + the `fork-only` branch merged together.
 This is intentional: `hermes-provisioner/provision.py` clones this fork and depends on
 all branches being present. Do not remove any branch from fork main until its PR lands upstream.
+
+Fork `main` also currently carries these non-upstream-PR branches because provisioned
+agents depend on them:
+- `feat/discord-shared-channel`
+- `feat/mirror-autocreate-channel-session`
+- `feat/send-message-dgproxy`
 
 ### Fork-only branch
 
@@ -90,6 +106,9 @@ When upstream `main` moves:
    git checkout fix/session-list-sort && git rebase upstream/main
    git checkout fix/mcp-initial-connect-retries && git rebase upstream/main
    git checkout fix/mcp-sse-transport && git rebase upstream/main
+   git checkout feat/discord-shared-channel && git rebase upstream/main
+   git checkout feat/mirror-autocreate-channel-session && git rebase upstream/main
+   git checkout feat/send-message-dgproxy && git rebase upstream/main
    # (fix/compressor-tool-args-valid-json removed — superseded by upstream 3128d9fc)
    # (fix/compound-background-subshell-leak removed — cherry-picked via upstream #12724 as abfc1847)
    git checkout feat/epub-document-support && git rebase upstream/main
@@ -101,6 +120,8 @@ When upstream `main` moves:
 3. Rebase stacked branches onto their parent (not upstream/main):
    ```
    git checkout feat/user-unify && git rebase feat/cron-memory-peers
+   git checkout feat/routing-context-user-id && git rebase feat/model-routing
+   git checkout feat/agent-actor-runtime-stacked && git rebase feat/routing-context-user-id
    ```
 4. Force-push each branch to origin.
 5. Rebuild fork main: reset to `upstream/main`, then merge all branches. The
@@ -115,11 +136,16 @@ When upstream `main` moves:
             fix/bg-skill-notify fix/session-list-sort \
             fix/mcp-initial-connect-retries fix/mcp-sse-transport \
             feat/model-routing \
+            feat/routing-context-user-id \
+            feat/discord-shared-channel \
+            feat/mirror-autocreate-channel-session \
+            feat/send-message-dgproxy \
             feat/epub-document-support \
             feat/html-document-support \
             feat/rehydrate-compaction-summary \
             fix/route-aware-background-agents \
-            fork-only; do
+            fork-only \
+            feat/agent-actor-runtime-stacked; do
      git merge --no-edit "$b" || break
    done
    ```
@@ -128,6 +154,10 @@ When upstream `main` moves:
    loop manually with the remaining branches. This happens most often at the
    `_classify_source_kind` / `_is_owner_source` adjacency in `gateway/run.py`
    when `feat/model-routing` meets `feat/user-unify`.
+   Also expect a union conflict when `feat/agent-actor-runtime-stacked` meets
+   fork main: keep both `self_state` and `integrations` in `toolsets.py`, and
+   keep `infer_platform_authority(source) == "owner"` before the `_is_owner_source`
+   fallback in `_classify_source_kind`.
 6. Force-push fork main.
 
 ## Post-rebase pitfalls
@@ -176,6 +206,26 @@ routes at match time, so no deployed config breaks. When rebasing, expect a conf
 at the `_classify_source_kind` / `_is_owner_source` adjacency in `gateway/run.py` —
 union-resolve (keep both methods, have `_classify_source_kind` delegate to
 `_is_owner_source`).
+
+**#14883 (routing-context-user-id):** Stacked on #12234. Adds trusted-platform
+`user_id` to the routing context so `model.routes` can match a specific sender in
+group channels. Suppresses `user_id` for spoofable transports (`webhook`,
+`api_server`) so caller-supplied identity cannot trigger owner routes.
+
+**#14884 (agent-actor-runtime-stacked):** Stacked on #14883. Adds
+`gateway/agent_actor.py`, a state-db event log for inbound/outbound/directive
+activity, an ephemeral runtime-state packet injected into gateway turns, the
+read-only `self_state` tool, and outbound policy checks for `send_message` and cron
+delivery. On fork main it overlaps with `feat/user-unify` and `fork-only`: keep
+actor `infer_platform_authority` owner detection before `_is_owner_source`, keep
+trusted `user_id` routing context, and keep both core tools (`self_state` and
+`integrations`) in `toolsets.py`.
+
+**#11647 (mcp-sse-transport):** During the April 2026 rebase, upstream had added
+`ssl_verify` handling in `MCPServer._run_http` at the same line where this branch
+adds transport selection. Union-resolve by keeping both
+`ssl_verify = config.get("ssl_verify", True)` and
+`transport = self._resolve_http_transport(url, config)`.
 
 **#5688 (multi-memory-provider):** Re-added `MemoryManager.provider_names` property
 after upstream dead-code sweep deleted it. Branch depends on it in `run_agent.py`.
