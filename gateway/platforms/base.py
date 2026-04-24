@@ -713,7 +713,8 @@ class MessageEvent:
     # Reply context
     reply_to_message_id: Optional[str] = None
     reply_to_text: Optional[str] = None  # Text of the replied-to message (for context injection)
-    
+    reply_to_author: Optional[str] = None  # Display name of the replied-to author — prevents agents from mistaking another participant's quoted words for fabricated history attributed to them.
+
     # Auto-loaded skill(s) for topic/channel bindings (e.g., Telegram DM Topics,
     # Discord channel_skill_bindings).  A single name or ordered list.
     auto_skill: Optional[str | list[str]] = None
