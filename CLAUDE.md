@@ -221,7 +221,11 @@ read-only `self_state` tool, and outbound policy checks for `send_message` and c
 delivery. On fork main it overlaps with `feat/user-unify` and `fork-only`: keep
 actor `infer_platform_authority` owner detection before `_is_owner_source`, keep
 trusted `user_id` routing context, and keep both core tools (`self_state` and
-`integrations`) in `toolsets.py`.
+`integrations`) in `toolsets.py`. The runtime-state packet is volatile per
+turn (`inbound_event_id`, recent events, sender), so it must be injected as
+API-only user context via `ephemeral_user_context`, not appended to
+`ephemeral_system_prompt`; otherwise every turn changes the system prefix and
+breaks provider prompt caching.
 
 **#11647 (mcp-sse-transport):** During the April 2026 rebase, upstream had added
 `ssl_verify` handling in `MCPServer._run_http` at the same line where this branch
