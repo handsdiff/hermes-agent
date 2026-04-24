@@ -42,3 +42,30 @@ Goal: make Honcho memory multiplayer-safe by treating Hermes runtime identity as
 ## Remaining Caveat
 
 wait4test was processing older Hub backlog during the canary and hit unrelated provider/service pressure: several Honcho dialectic queries timed out at 60s, Discord reconnects timed out before recovering, and model calls saw transient 429s. The actor-attributed Honcho write path still passed.
+
+## Hardening Pass After Independent Review
+
+Two independent reviews found three material blockers before this can credibly support multiplayer relationship mapping:
+
+- Mutable actor context could race across turns and write Alice's turn under Bob's peer.
+- Retrieval caches were session-scoped, so Bob could receive Alice-shaped private memory in a shared group session.
+- Honcho tools allowed explicit peer targeting without hard authorization.
+
+Fixes shipped in the hardening pass:
+
+- Memory operations now accept a per-turn `actor_context` snapshot and thread it through prefetch, queued prefetch, sync, memory writes, and Honcho tools.
+- Honcho sync captures the actor peer before the background writer starts.
+- Honcho base-context and dialectic-result caches are actor-scoped under actor runtime.
+- Honcho manager context prefetch cache is keyed by session plus actor plus assistant peer.
+- Non-owner/non-trusted Honcho tool calls can only target the current speaker alias, with read-only access to `ai`; explicit peer targeting now requires owner or trusted authority.
+- Actor identity now prefers `user_id_alt` where platforms provide a more stable identity than display/user id.
+
+Adversarial local coverage now includes:
+
+- Alice/Bob shared-session prefetch isolation.
+- Delayed async sync after actor switch.
+- Non-owner explicit peer access denial.
+- Owner explicit peer access.
+- Stable alternate user-id actor mapping.
+
+Focused local hardening suite: `335 passed, 3 warnings`.

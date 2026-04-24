@@ -4253,16 +4253,16 @@ class GatewayRunner:
         inbound_authority = ""
         actor_state_packet = ""
         honcho_actor_context = {}
-        if self._session_db is not None:
-            try:
-                from gateway.agent_actor import (
-                    build_honcho_actor_context,
-                    infer_platform_authority,
-                    maybe_record_directive_from_inbound,
-                    record_inbound_event,
-                )
+        try:
+            from gateway.agent_actor import (
+                build_honcho_actor_context,
+                infer_platform_authority,
+                maybe_record_directive_from_inbound,
+                record_inbound_event,
+            )
 
-                inbound_authority = infer_platform_authority(source)
+            inbound_authority = infer_platform_authority(source)
+            if self._session_db is not None:
                 inbound_event_id, inbound_person_id = record_inbound_event(
                     self._session_db,
                     source=source,
@@ -4283,13 +4283,13 @@ class GatewayRunner:
                     text=event.text or "",
                     authority=inbound_authority,
                 )
-                honcho_actor_context = build_honcho_actor_context(
-                    source,
-                    person_id=inbound_person_id,
-                    authority=inbound_authority,
-                )
-            except Exception as _actor_exc:
-                logger.debug("Agent actor inbound recording failed: %s", _actor_exc)
+            honcho_actor_context = build_honcho_actor_context(
+                source,
+                person_id=inbound_person_id,
+                authority=inbound_authority,
+            )
+        except Exception as _actor_exc:
+            logger.debug("Agent actor inbound recording failed: %s", _actor_exc)
         
         # Set session context variables for tools (task-local, concurrency-safe)
         _session_env_tokens = self._set_session_env(

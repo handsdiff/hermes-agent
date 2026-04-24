@@ -1,5 +1,7 @@
 """Tests for plugins/memory/honcho/session.py — HonchoSession and helpers."""
 
+import json
+import threading
 from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -456,6 +458,142 @@ class TestActorRuntimePeers:
         })
 
         assert mgr._resolve_peer_id(session, "user") == "owner"
+
+
+class TestActorRuntimeIsolation:
+    def _provider(self):
+        provider = HonchoMemoryProvider()
+        provider._actor_runtime_enabled = True
+        provider._session_initialized = True
+        provider._session_key = "discord:group:general"
+        provider._recall_mode = "hybrid"
+        provider._turn_count = 1
+        provider._last_dialectic_turn = 0
+        provider._legacy_peer_ids = []
+        provider._config = SimpleNamespace(
+            context_tokens=None,
+            message_max_chars=25000,
+            timeout=0.1,
+        )
+        return provider
+
+    def test_prefetch_base_context_is_keyed_by_actor(self):
+        provider = self._provider()
+
+        class Manager:
+            def current_actor_peer_id(self, session=None, actor_context=None):
+                return actor_context["peer_id"]
+
+            def get_prefetch_context(self, session_key, user_message=None, legacy_peer_ids=None, actor_context=None):
+                peer_id = actor_context["peer_id"]
+                return {
+                    "actor_peer_id": peer_id,
+                    "actor_display_name": peer_id,
+                    "actor_kind": "human",
+                    "representation": f"{peer_id} private representation",
+                }
+
+            def pop_context_result(self, session_key, actor_context=None):
+                return {}
+
+        provider._manager = Manager()
+        alice = {"peer_id": "human_discord_alice", "agent_peer_id": "agent_wait4test"}
+        bob = {"peer_id": "human_discord_bob", "agent_peer_id": "agent_wait4test"}
+
+        alice_context = provider.prefetch("what changed?", actor_context=alice)
+        bob_context = provider.prefetch("what changed?", actor_context=bob)
+
+        assert "human_discord_alice private representation" in alice_context
+        assert "human_discord_bob private representation" in bob_context
+        assert "human_discord_alice private representation" not in bob_context
+
+    def test_sync_turn_captures_actor_before_background_writer_runs(self):
+        provider = self._provider()
+        release = threading.Event()
+        session = HonchoSession(
+            key="discord:group:general",
+            user_peer_id="human_discord_alice",
+            assistant_peer_id="agent_wait4test",
+            honcho_session_id="discord-group-general",
+            peer_ids={"human_discord_alice", "agent_wait4test"},
+        )
+
+        class Manager:
+            def __init__(self):
+                self.actor_context = {}
+
+            def set_actor_context(self, actor_context):
+                self.actor_context = actor_context
+
+            def current_actor_peer_id(self, session=None, actor_context=None):
+                ctx = actor_context if actor_context is not None else self.actor_context
+                return ctx["peer_id"]
+
+            def get_or_create(self, key, actor_context=None):
+                release.wait(2)
+                return session
+
+            def _ensure_session_peer(self, session, peer_id):
+                session.peer_ids.add(peer_id)
+
+            def _flush_session(self, session):
+                return True
+
+        provider._manager = Manager()
+        alice = {"peer_id": "human_discord_alice", "agent_peer_id": "agent_wait4test"}
+        bob = {"peer_id": "human_discord_bob", "agent_peer_id": "agent_wait4test"}
+
+        provider.set_actor_context(alice)
+        provider.sync_turn("Alice fact", "ok", actor_context=alice)
+        provider.set_actor_context(bob)
+        release.set()
+        provider._sync_thread.join(timeout=2)
+
+        assert session.messages[0]["peer_id"] == "human_discord_alice"
+        assert session.messages[0]["content"] == "Alice fact"
+
+    def test_non_owner_cannot_target_explicit_peer_with_tool(self):
+        provider = self._provider()
+        provider._manager = MagicMock()
+
+        result = json.loads(provider.handle_tool_call(
+            "honcho_search",
+            {"query": "private facts", "peer": "human_discord_alice"},
+            actor_context={
+                "peer_id": "human_discord_bob",
+                "agent_peer_id": "agent_wait4test",
+                "authority": "user",
+            },
+        ))
+
+        assert "denied" in result["error"]
+        provider._manager.search_context.assert_not_called()
+
+    def test_owner_can_target_explicit_peer_with_tool(self):
+        provider = self._provider()
+        provider._manager = MagicMock()
+        provider._manager.search_context.return_value = "Alice context"
+        actor_context = {
+            "peer_id": "owner",
+            "peer_kind": "owner",
+            "agent_peer_id": "agent_wait4test",
+            "authority": "owner",
+        }
+
+        result = json.loads(provider.handle_tool_call(
+            "honcho_search",
+            {"query": "private facts", "peer": "human_discord_alice"},
+            actor_context=actor_context,
+        ))
+
+        assert result == {"result": "Alice context"}
+        provider._manager.search_context.assert_called_once_with(
+            "discord:group:general",
+            "private facts",
+            max_tokens=800,
+            peer="human_discord_alice",
+            actor_context=actor_context,
+        )
 
 
 class TestConcludeToolDispatch:

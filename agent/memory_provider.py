@@ -89,7 +89,7 @@ class MemoryProvider(ABC):
         """
         return ""
 
-    def prefetch(self, query: str, *, session_id: str = "") -> str:
+    def prefetch(self, query: str, *, session_id: str = "", **kwargs) -> str:
         """Recall relevant context for the upcoming turn.
 
         Called before each API call. Return formatted text to inject as
@@ -103,7 +103,7 @@ class MemoryProvider(ABC):
         """
         return ""
 
-    def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
+    def queue_prefetch(self, query: str, *, session_id: str = "", **kwargs) -> None:
         """Queue a background recall for the NEXT turn.
 
         Called after each turn completes. The result will be consumed
@@ -111,7 +111,7 @@ class MemoryProvider(ABC):
         that do background prefetching should override this.
         """
 
-    def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
+    def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "", **kwargs) -> None:
         """Persist a completed turn to the backend.
 
         Called after each turn. Should be non-blocking — queue for

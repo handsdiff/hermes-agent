@@ -112,7 +112,7 @@ class HonchoSessionManager:
         # Dialectic results are cached on the plugin side (HonchoMemoryProvider
         # ._prefetch_result) so session-start prewarm and turn-driven fires share
         # one source of truth; see __init__.py _do_session_init for the prewarm.
-        self._context_cache: dict[str, dict] = {}
+        self._context_cache: dict[Any, dict] = {}
         self._prefetch_cache_lock = threading.Lock()
         self._dialectic_reasoning_level: str = (
             config.dialectic_reasoning_level if config else "low"
@@ -279,7 +279,11 @@ class HonchoSessionManager:
             return self._sanitize_id(self._config.peer_name)
         return "owner"
 
-    def _current_actor_peer_id(self, session: HonchoSession | None = None) -> str:
+    def _current_actor_peer_id(
+        self,
+        session: HonchoSession | None = None,
+        actor_context: dict[str, Any] | None = None,
+    ) -> str:
         if not getattr(self, "_actor_runtime_enabled", False):
             if session is not None:
                 return session.user_peer_id
@@ -288,7 +292,7 @@ class HonchoSessionManager:
                 or (self._config.peer_name if self._config and self._config.peer_name else "user")
             )
 
-        ctx = self._actor_context or {}
+        ctx = actor_context if actor_context is not None else (self._actor_context or {})
         if ctx.get("peer_kind") == "owner":
             return self._configured_owner_peer_id()
         raw_peer = ctx.get("peer_id") or ctx.get("person_id") or ctx.get("platform_user_id")
@@ -300,13 +304,18 @@ class HonchoSessionManager:
             return session.user_peer_id
         return "system-unknown"
 
-    def current_actor_peer_id(self, session: HonchoSession | None = None) -> str:
+    def current_actor_peer_id(
+        self,
+        session: HonchoSession | None = None,
+        actor_context: dict[str, Any] | None = None,
+    ) -> str:
         """Public wrapper for the active actor peer used by the provider."""
-        return self._current_actor_peer_id(session)
+        return self._current_actor_peer_id(session, actor_context=actor_context)
 
-    def _assistant_peer_id(self) -> str:
+    def _assistant_peer_id(self, actor_context: dict[str, Any] | None = None) -> str:
         if getattr(self, "_actor_runtime_enabled", False):
-            peer_id = (self._actor_context or {}).get("agent_peer_id")
+            ctx = actor_context if actor_context is not None else (self._actor_context or {})
+            peer_id = ctx.get("agent_peer_id")
             if peer_id:
                 return self._sanitize_id(str(peer_id))
         return self._sanitize_id(
@@ -343,7 +352,11 @@ class HonchoSessionManager:
         session.peer_ids.add(peer_id)
         return peer
 
-    def get_or_create(self, key: str) -> HonchoSession:
+    def get_or_create(
+        self,
+        key: str,
+        actor_context: dict[str, Any] | None = None,
+    ) -> HonchoSession:
         """
         Get an existing session or create a new one.
 
@@ -358,7 +371,7 @@ class HonchoSessionManager:
             return self._cache[key]
 
         if getattr(self, "_actor_runtime_enabled", False):
-            user_peer_id = self._current_actor_peer_id()
+            user_peer_id = self._current_actor_peer_id(actor_context=actor_context)
         # Gateway sessions should use the runtime user identity when available.
         elif self._runtime_user_peer_name:
             user_peer_id = self._sanitize_id(self._runtime_user_peer_name)
@@ -371,7 +384,7 @@ class HonchoSessionManager:
             chat_id = parts[1] if len(parts) > 1 else key
             user_peer_id = self._sanitize_id(f"user-{channel}-{chat_id}")
 
-        assistant_peer_id = self._assistant_peer_id()
+        assistant_peer_id = self._assistant_peer_id(actor_context=actor_context)
 
         # Sanitize session ID for Honcho
         honcho_session_id = self._sanitize_id(key)
@@ -587,6 +600,7 @@ class HonchoSessionManager:
         self, session_key: str, query: str,
         reasoning_level: str | None = None,
         peer: str = "user",
+        actor_context: dict[str, Any] | None = None,
     ) -> str:
         """
         Query Honcho's dialectic endpoint about a peer.
@@ -610,7 +624,11 @@ class HonchoSessionManager:
         if not session:
             return ""
 
-        target_peer_id = self._resolve_peer_id(session, peer)
+        target_peer_id = self._resolve_peer_id(
+            session,
+            peer,
+            actor_context=actor_context,
+        )
         if target_peer_id is None:
             return ""
 
@@ -648,42 +666,73 @@ class HonchoSessionManager:
             logger.warning("Honcho dialectic query failed: %s", e)
             return ""
 
-    def prefetch_context(self, session_key: str, user_message: str | None = None) -> None:
+    def _context_cache_key(
+        self,
+        session_key: str,
+        actor_context: dict[str, Any] | None = None,
+    ) -> Any:
+        if not getattr(self, "_actor_runtime_enabled", False):
+            return session_key
+        return (
+            session_key,
+            self._current_actor_peer_id(actor_context=actor_context),
+            self._assistant_peer_id(actor_context=actor_context),
+        )
+
+    def prefetch_context(
+        self,
+        session_key: str,
+        user_message: str | None = None,
+        actor_context: dict[str, Any] | None = None,
+    ) -> None:
         """
         Fire get_prefetch_context in a background thread, caching the result.
 
         Non-blocking. Consumed next turn via pop_context_result(). This avoids
         a synchronous HTTP round-trip blocking every response.
         """
+        cache_key = self._context_cache_key(session_key, actor_context=actor_context)
+        actor_context_snapshot = dict(actor_context or {})
+
         def _run():
-            result = self.get_prefetch_context(session_key, user_message)
+            result = self.get_prefetch_context(
+                session_key,
+                user_message,
+                actor_context=actor_context_snapshot,
+            )
             if result:
-                self.set_context_result(session_key, result)
+                self.set_context_result(cache_key, result)
 
         t = threading.Thread(target=_run, name="honcho-context-prefetch", daemon=True)
         t.start()
 
-    def set_context_result(self, session_key: str, result: dict[str, str]) -> None:
+    def set_context_result(self, cache_key: Any, result: dict[str, str]) -> None:
         """Store a prefetched context result in a thread-safe way."""
         if not result:
             return
         with self._prefetch_cache_lock:
-            self._context_cache[session_key] = result
+            self._context_cache[cache_key] = result
 
-    def pop_context_result(self, session_key: str) -> dict[str, str]:
+    def pop_context_result(
+        self,
+        session_key: str,
+        actor_context: dict[str, Any] | None = None,
+    ) -> dict[str, str]:
         """
         Return and clear the cached context result for this session.
 
         Returns empty dict if no result is ready yet (first turn).
         """
+        cache_key = self._context_cache_key(session_key, actor_context=actor_context)
         with self._prefetch_cache_lock:
-            return self._context_cache.pop(session_key, {})
+            return self._context_cache.pop(cache_key, {})
 
     def get_prefetch_context(
         self,
         session_key: str,
         user_message: str | None = None,
         legacy_peer_ids: list[str] | None = None,
+        actor_context: dict[str, Any] | None = None,
     ) -> dict[str, str]:
         """
         Pre-fetch user and AI peer context from Honcho.
@@ -726,7 +775,10 @@ class HonchoSessionManager:
         except Exception as e:
             logger.debug("Failed to fetch session summary from Honcho: %s", e)
 
-        target_user_peer_id = self._current_actor_peer_id(session)
+        target_user_peer_id = self._current_actor_peer_id(
+            session,
+            actor_context=actor_context,
+        )
         if getattr(self, "_actor_runtime_enabled", False):
             self._ensure_session_peer(session, target_user_peer_id)
 
@@ -741,12 +793,13 @@ class HonchoSessionManager:
                     target_user_peer_id,
                     target=target_user_peer_id,
                 )
-            result["representation"] = user_ctx["representation"]
-            result["card"] = "\n".join(user_ctx["card"])
+                result["representation"] = user_ctx["representation"]
+                result["card"] = "\n".join(user_ctx["card"])
             if getattr(self, "_actor_runtime_enabled", False):
                 result["actor_peer_id"] = target_user_peer_id
-                result["actor_display_name"] = str((self._actor_context or {}).get("display_name") or "")
-                result["actor_kind"] = str((self._actor_context or {}).get("peer_kind") or "")
+                ctx = actor_context if actor_context is not None else (self._actor_context or {})
+                result["actor_display_name"] = str(ctx.get("display_name") or "")
+                result["actor_kind"] = str(ctx.get("peer_kind") or "")
         except Exception as e:
             logger.warning("Failed to fetch user context from Honcho: %s", e)
 
@@ -1017,7 +1070,12 @@ class HonchoSessionManager:
 
         return {"representation": representation, "card": card}
 
-    def get_session_context(self, session_key: str, peer: str = "user") -> dict[str, Any]:
+    def get_session_context(
+        self,
+        session_key: str,
+        peer: str = "user",
+        actor_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Fetch full session context from Honcho including summary.
 
         Uses the session-level context() API which returns summary,
@@ -1030,13 +1088,13 @@ class HonchoSessionManager:
         honcho_session = self._sessions_cache.get(session.honcho_session_id)
         if not honcho_session:
             # Fall back to peer-level context, respecting the requested peer
-            peer_id = self._resolve_peer_id(session, peer)
+            peer_id = self._resolve_peer_id(session, peer, actor_context=actor_context)
             if peer_id is None:
                 peer_id = session.user_peer_id
             return self._fetch_peer_context(peer_id, target=peer_id)
 
         try:
-            peer_id = self._resolve_peer_id(session, peer)
+            peer_id = self._resolve_peer_id(session, peer, actor_context=actor_context)
             if getattr(self, "_actor_runtime_enabled", False):
                 self._ensure_session_peer(session, peer_id)
             perspective = (
@@ -1075,7 +1133,12 @@ class HonchoSessionManager:
             logger.debug("Session context fetch failed: %s", e)
             return {}
 
-    def _resolve_peer_id(self, session: HonchoSession, peer: str | None) -> str:
+    def _resolve_peer_id(
+        self,
+        session: HonchoSession,
+        peer: str | None,
+        actor_context: dict[str, Any] | None = None,
+    ) -> str:
         """Resolve a peer alias or explicit peer ID to a concrete Honcho peer ID.
 
         Always returns a non-empty string: either a known peer ID or a
@@ -1088,7 +1151,7 @@ class HonchoSessionManager:
         normalized = self._sanitize_id(candidate)
         if normalized == self._sanitize_id("user"):
             if getattr(self, "_actor_runtime_enabled", False):
-                return self._current_actor_peer_id(session)
+                return self._current_actor_peer_id(session, actor_context=actor_context)
             return session.user_peer_id
         if normalized == self._sanitize_id("ai"):
             return session.assistant_peer_id
@@ -1099,9 +1162,10 @@ class HonchoSessionManager:
         self,
         session: HonchoSession,
         peer: str | None,
+        actor_context: dict[str, Any] | None = None,
     ) -> tuple[str, str | None]:
         """Resolve observer and target peer IDs for context/search/profile queries."""
-        target_peer_id = self._resolve_peer_id(session, peer)
+        target_peer_id = self._resolve_peer_id(session, peer, actor_context=actor_context)
 
         if target_peer_id == session.assistant_peer_id:
             return session.assistant_peer_id, session.assistant_peer_id
@@ -1111,7 +1175,12 @@ class HonchoSessionManager:
 
         return target_peer_id, None
 
-    def get_peer_card(self, session_key: str, peer: str = "user") -> list[str]:
+    def get_peer_card(
+        self,
+        session_key: str,
+        peer: str = "user",
+        actor_context: dict[str, Any] | None = None,
+    ) -> list[str]:
         """
         Fetch a peer card — a curated list of key facts.
 
@@ -1124,7 +1193,11 @@ class HonchoSessionManager:
             return []
 
         try:
-            observer_peer_id, target_peer_id = self._resolve_observer_target(session, peer)
+            observer_peer_id, target_peer_id = self._resolve_observer_target(
+                session,
+                peer,
+                actor_context=actor_context,
+            )
             return self._fetch_peer_card(observer_peer_id, target=target_peer_id)
         except Exception as e:
             logger.debug("Failed to fetch peer card from Honcho: %s", e)
@@ -1136,6 +1209,7 @@ class HonchoSessionManager:
         query: str,
         max_tokens: int = 800,
         peer: str = "user",
+        actor_context: dict[str, Any] | None = None,
     ) -> str:
         """
         Semantic search over Honcho session context.
@@ -1158,7 +1232,11 @@ class HonchoSessionManager:
             return ""
 
         try:
-            observer_peer_id, target = self._resolve_observer_target(session, peer)
+            observer_peer_id, target = self._resolve_observer_target(
+                session,
+                peer,
+                actor_context=actor_context,
+            )
 
             ctx = self._fetch_peer_context(
                 observer_peer_id,
@@ -1176,7 +1254,13 @@ class HonchoSessionManager:
             logger.debug("Honcho search_context failed: %s", e)
             return ""
 
-    def create_conclusion(self, session_key: str, content: str, peer: str = "user") -> bool:
+    def create_conclusion(
+        self,
+        session_key: str,
+        content: str,
+        peer: str = "user",
+        actor_context: dict[str, Any] | None = None,
+    ) -> bool:
         """Write a conclusion about a target peer back to Honcho.
 
         Conclusions are facts a peer observes about another peer or itself —
@@ -1200,7 +1284,7 @@ class HonchoSessionManager:
             return False
 
         try:
-            target_peer_id = self._resolve_peer_id(session, peer)
+            target_peer_id = self._resolve_peer_id(session, peer, actor_context=actor_context)
             if target_peer_id is None:
                 logger.warning("Could not resolve conclusion peer '%s' for session '%s'", peer, session_key)
                 return False
@@ -1225,7 +1309,13 @@ class HonchoSessionManager:
             logger.error("Failed to create conclusion: %s", e)
             return False
 
-    def delete_conclusion(self, session_key: str, conclusion_id: str, peer: str = "user") -> bool:
+    def delete_conclusion(
+        self,
+        session_key: str,
+        conclusion_id: str,
+        peer: str = "user",
+        actor_context: dict[str, Any] | None = None,
+    ) -> bool:
         """Delete a conclusion by ID. Use only for PII removal.
 
         Args:
@@ -1240,7 +1330,7 @@ class HonchoSessionManager:
         if not session:
             return False
         try:
-            target_peer_id = self._resolve_peer_id(session, peer)
+            target_peer_id = self._resolve_peer_id(session, peer, actor_context=actor_context)
             if target_peer_id == session.assistant_peer_id:
                 observer = self._get_or_create_peer(session.assistant_peer_id)
                 scope = observer.conclusions_of(session.assistant_peer_id)
@@ -1257,7 +1347,13 @@ class HonchoSessionManager:
             logger.error("Failed to delete conclusion %s: %s", conclusion_id, e)
             return False
 
-    def set_peer_card(self, session_key: str, card: list[str], peer: str = "user") -> list[str] | None:
+    def set_peer_card(
+        self,
+        session_key: str,
+        card: list[str],
+        peer: str = "user",
+        actor_context: dict[str, Any] | None = None,
+    ) -> list[str] | None:
         """Update a peer's card.
 
         Args:
@@ -1272,7 +1368,7 @@ class HonchoSessionManager:
         if not session:
             return None
         try:
-            peer_id = self._resolve_peer_id(session, peer)
+            peer_id = self._resolve_peer_id(session, peer, actor_context=actor_context)
             if peer_id is None:
                 logger.warning("Could not resolve peer '%s' for set_peer_card in session '%s'", peer, session_key)
                 return None

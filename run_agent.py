@@ -7736,7 +7736,14 @@ class AIAgent:
         )
         return compressed, new_system_prompt
 
-    def _execute_tool_calls(self, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0) -> None:
+    def _execute_tool_calls(
+        self,
+        assistant_message,
+        messages: list,
+        effective_task_id: str,
+        api_call_count: int = 0,
+        actor_context: Optional[Dict[str, Any]] = None,
+    ) -> None:
         """Execute tool calls from the assistant message and append results to messages.
 
         Dispatches to concurrent execution only for batches that look
@@ -7750,11 +7757,13 @@ class AIAgent:
         try:
             if not _should_parallelize_tool_batch(tool_calls):
                 return self._execute_tool_calls_sequential(
-                    assistant_message, messages, effective_task_id, api_call_count
+                    assistant_message, messages, effective_task_id, api_call_count,
+                    actor_context=actor_context,
                 )
 
             return self._execute_tool_calls_concurrent(
-                assistant_message, messages, effective_task_id, api_call_count
+                assistant_message, messages, effective_task_id, api_call_count,
+                actor_context=actor_context,
             )
         finally:
             self._executing_tools = False
@@ -7778,8 +7787,15 @@ class AIAgent:
             parent_agent=self,
         )
 
-    def _invoke_tool(self, function_name: str, function_args: dict, effective_task_id: str,
-                     tool_call_id: Optional[str] = None, messages: list = None) -> str:
+    def _invoke_tool(
+        self,
+        function_name: str,
+        function_args: dict,
+        effective_task_id: str,
+        tool_call_id: Optional[str] = None,
+        messages: list = None,
+        actor_context: Optional[Dict[str, Any]] = None,
+    ) -> str:
         """Invoke a single tool and return the result string. No display logic.
 
         Handles both agent-level tools (todo, memory, etc.) and registry-dispatched
@@ -7829,16 +7845,31 @@ class AIAgent:
             # Bridge: notify external memory provider of built-in memory writes
             if self._memory_manager and function_args.get("action") in ("add", "replace"):
                 try:
-                    self._memory_manager.on_memory_write(
-                        function_args.get("action", ""),
-                        target,
-                        function_args.get("content", ""),
-                    )
+                    try:
+                        self._memory_manager.on_memory_write(
+                            function_args.get("action", ""),
+                            target,
+                            function_args.get("content", ""),
+                            actor_context=actor_context or {},
+                        )
+                    except TypeError:
+                        self._memory_manager.on_memory_write(
+                            function_args.get("action", ""),
+                            target,
+                            function_args.get("content", ""),
+                        )
                 except Exception:
                     pass
             return result
         elif self._memory_manager and self._memory_manager.has_tool(function_name):
-            return self._memory_manager.handle_tool_call(function_name, function_args)
+            try:
+                return self._memory_manager.handle_tool_call(
+                    function_name,
+                    function_args,
+                    actor_context=actor_context or {},
+                )
+            except TypeError:
+                return self._memory_manager.handle_tool_call(function_name, function_args)
         elif function_name == "clarify":
             from tools.clarify_tool import clarify_tool as _clarify_tool
             return _clarify_tool(
@@ -7882,7 +7913,14 @@ class AIAgent:
         body = ("\n" + indent).join(out_lines)
         return f"{indent}{label}{body}"
 
-    def _execute_tool_calls_concurrent(self, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0) -> None:
+    def _execute_tool_calls_concurrent(
+        self,
+        assistant_message,
+        messages: list,
+        effective_task_id: str,
+        api_call_count: int = 0,
+        actor_context: Optional[Dict[str, Any]] = None,
+    ) -> None:
         """Execute multiple tool calls concurrently using a thread pool.
 
         Results are collected in the original tool-call order and appended to
@@ -8009,7 +8047,14 @@ class AIAgent:
                 pass
             start = time.time()
             try:
-                result = self._invoke_tool(function_name, function_args, effective_task_id, tool_call.id, messages=messages)
+                result = self._invoke_tool(
+                    function_name,
+                    function_args,
+                    effective_task_id,
+                    tool_call.id,
+                    messages=messages,
+                    actor_context=actor_context,
+                )
             except Exception as tool_error:
                 result = f"Error executing tool '{function_name}': {tool_error}"
                 logger.error("_invoke_tool raised for %s: %s", function_name, tool_error, exc_info=True)
@@ -8185,7 +8230,14 @@ class AIAgent:
         if num_tools > 0:
             self._apply_pending_steer_to_tool_results(messages, num_tools)
 
-    def _execute_tool_calls_sequential(self, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0) -> None:
+    def _execute_tool_calls_sequential(
+        self,
+        assistant_message,
+        messages: list,
+        effective_task_id: str,
+        api_call_count: int = 0,
+        actor_context: Optional[Dict[str, Any]] = None,
+    ) -> None:
         """Execute tool calls sequentially (original behavior). Used for single calls or interactive tools."""
         for i, tool_call in enumerate(assistant_message.tool_calls, 1):
             # SAFETY: check interrupt BEFORE starting each tool.
@@ -8340,11 +8392,19 @@ class AIAgent:
                 # Bridge: notify external memory provider of built-in memory writes
                 if self._memory_manager and function_args.get("action") in ("add", "replace"):
                     try:
-                        self._memory_manager.on_memory_write(
-                            function_args.get("action", ""),
-                            target,
-                            function_args.get("content", ""),
-                        )
+                        try:
+                            self._memory_manager.on_memory_write(
+                                function_args.get("action", ""),
+                                target,
+                                function_args.get("content", ""),
+                                actor_context=actor_context or {},
+                            )
+                        except TypeError:
+                            self._memory_manager.on_memory_write(
+                                function_args.get("action", ""),
+                                target,
+                                function_args.get("content", ""),
+                            )
                     except Exception:
                         pass
                 tool_duration = time.time() - tool_start_time
@@ -8420,7 +8480,14 @@ class AIAgent:
                     spinner.start()
                 _mem_result = None
                 try:
-                    function_result = self._memory_manager.handle_tool_call(function_name, function_args)
+                    try:
+                        function_result = self._memory_manager.handle_tool_call(
+                            function_name,
+                            function_args,
+                            actor_context=actor_context or {},
+                        )
+                    except TypeError:
+                        function_result = self._memory_manager.handle_tool_call(function_name, function_args)
                     _mem_result = function_result
                 except Exception as tool_error:
                     function_result = json.dumps({"error": f"Memory tool '{function_name}' failed: {tool_error}"})
@@ -8896,6 +8963,8 @@ class AIAgent:
 
         # Preserve the original user message (no nudge injection).
         original_user_message = persist_user_message if persist_user_message is not None else user_message
+        _turn_actor_context = dict(self._actor_context or {})
+        self._active_turn_actor_context = _turn_actor_context
 
         # Track memory nudge trigger (turn-based, checked here).
         # Skill trigger is checked AFTER the agent loop completes, based on
@@ -9115,13 +9184,12 @@ class AIAgent:
         # and can gate context/dialectic refresh via contextCadence/dialecticCadence.
         if self._memory_manager:
             try:
-                if self._actor_context:
-                    self._memory_manager.set_actor_context(self._actor_context)
+                self._memory_manager.set_actor_context(_turn_actor_context)
                 _turn_msg = original_user_message if isinstance(original_user_message, str) else ""
                 self._memory_manager.on_turn_start(
                     self._user_turn_count,
                     _turn_msg,
-                    actor_context=self._actor_context,
+                    actor_context=_turn_actor_context,
                 )
             except Exception:
                 pass
@@ -9135,7 +9203,16 @@ class AIAgent:
         if self._memory_manager:
             try:
                 _query = original_user_message if isinstance(original_user_message, str) else ""
-                _ext_prefetch_cache = self._memory_manager.prefetch_all(_query) or ""
+                try:
+                    _ext_prefetch_cache = (
+                        self._memory_manager.prefetch_all(
+                            _query,
+                            actor_context=_turn_actor_context,
+                        )
+                        or ""
+                    )
+                except TypeError:
+                    _ext_prefetch_cache = self._memory_manager.prefetch_all(_query) or ""
             except Exception:
                 pass
 
@@ -11467,7 +11544,13 @@ class AIAgent:
                         except Exception:
                             pass
 
-                    self._execute_tool_calls(assistant_message, messages, effective_task_id, api_call_count)
+                    self._execute_tool_calls(
+                        assistant_message,
+                        messages,
+                        effective_task_id,
+                        api_call_count,
+                        actor_context=_turn_actor_context,
+                    )
 
                     # Reset per-turn retry counters after successful tool
                     # execution so a single truncation doesn't poison the
@@ -12046,8 +12129,19 @@ class AIAgent:
         # injected skill content that bloats / breaks provider queries.
         if self._memory_manager and final_response and original_user_message:
             try:
-                self._memory_manager.sync_all(original_user_message, final_response)
-                self._memory_manager.queue_prefetch_all(original_user_message)
+                try:
+                    self._memory_manager.sync_all(
+                        original_user_message,
+                        final_response,
+                        actor_context=_turn_actor_context,
+                    )
+                    self._memory_manager.queue_prefetch_all(
+                        original_user_message,
+                        actor_context=_turn_actor_context,
+                    )
+                except TypeError:
+                    self._memory_manager.sync_all(original_user_message, final_response)
+                    self._memory_manager.queue_prefetch_all(original_user_message)
             except Exception:
                 pass
 

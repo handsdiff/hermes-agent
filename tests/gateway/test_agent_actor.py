@@ -109,6 +109,24 @@ def test_honcho_actor_context_scopes_group_senders_separately():
     assert alice_ctx["agent_peer_id"] == "agent_wait4test"
 
 
+def test_honcho_actor_context_prefers_stable_alt_user_id():
+    source = SessionSource(
+        platform=Platform.SIGNAL,
+        chat_id="group",
+        chat_type="group",
+        user_id="+15551234567",
+        user_id_alt="uuid:abc-123",
+        user_name="Alice",
+    )
+
+    ctx = build_honcho_actor_context(source, authority="user", agent_id="wait4test")
+
+    assert ctx["peer_id"] == "human_signal_uuid_abc-123"
+    assert ctx["platform_user_id"] == "uuid:abc-123"
+    assert ctx["platform_primary_user_id"] == "+15551234567"
+    assert ctx["platform_alt_user_id"] == "uuid:abc-123"
+
+
 def test_honcho_actor_context_uses_owner_peer_for_owner():
     source = SessionSource(
         platform=Platform.DISCORD,

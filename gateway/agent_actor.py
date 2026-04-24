@@ -190,7 +190,11 @@ def infer_platform_authority(source: Any) -> str:
 
 def resolve_identity(db, source: Any, authority: str = "") -> str:
     platform = _platform_value(getattr(source, "platform", ""))
-    user_id = str(getattr(source, "user_id", "") or "")
+    user_id = str(
+        getattr(source, "user_id_alt", None)
+        or getattr(source, "user_id", "")
+        or ""
+    )
     if not platform or not user_id:
         return ""
     authority = authority or infer_platform_authority(source)
@@ -236,7 +240,9 @@ def build_honcho_actor_context(
     peers while the assistant remains one stable peer.
     """
     platform = _platform_value(getattr(source, "platform", "")).strip().lower()
-    user_id = str(getattr(source, "user_id", "") or "").strip()
+    primary_user_id = str(getattr(source, "user_id", "") or "").strip()
+    user_id_alt = str(getattr(source, "user_id_alt", "") or "").strip()
+    user_id = user_id_alt or primary_user_id
     user_name = str(getattr(source, "user_name", "") or "").strip()
     chat_id = str(getattr(source, "chat_id", "") or "").strip()
     chat_type = str(getattr(source, "chat_type", "") or "").strip()
@@ -271,6 +277,8 @@ def build_honcho_actor_context(
         "authority": authority,
         "platform": platform,
         "platform_user_id": user_id,
+        "platform_primary_user_id": primary_user_id,
+        "platform_alt_user_id": user_id_alt,
         "display_name": user_name,
         "chat_id": chat_id,
         "chat_type": chat_type,

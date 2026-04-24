@@ -30,6 +30,7 @@ Usage in run_agent.py:
 from __future__ import annotations
 
 import json
+import inspect
 import logging
 import re
 from typing import Any, Dict, List, Optional
@@ -170,7 +171,36 @@ class MemoryManager:
 
     # -- Prefetch / recall ---------------------------------------------------
 
-    def prefetch_all(self, query: str, *, session_id: str = "") -> str:
+    @staticmethod
+    def _method_accepts_kw(method, kw: str) -> bool:
+        """Return whether a provider method accepts a runtime keyword."""
+        try:
+            sig = inspect.signature(method)
+        except (TypeError, ValueError):
+            return False
+        for param in sig.parameters.values():
+            if param.kind == inspect.Parameter.VAR_KEYWORD:
+                return True
+            if param.name == kw:
+                return True
+        return False
+
+    @classmethod
+    def _call_provider_method(cls, method, *args, **kwargs):
+        accepted = {
+            key: value
+            for key, value in kwargs.items()
+            if cls._method_accepts_kw(method, key)
+        }
+        return method(*args, **accepted)
+
+    def prefetch_all(
+        self,
+        query: str,
+        *,
+        session_id: str = "",
+        actor_context: Dict[str, Any] | None = None,
+    ) -> str:
         """Collect prefetch context from all providers.
 
         Returns merged context text labeled by provider. Empty providers
@@ -179,7 +209,12 @@ class MemoryManager:
         parts = []
         for provider in self._providers:
             try:
-                result = provider.prefetch(query, session_id=session_id)
+                result = self._call_provider_method(
+                    provider.prefetch,
+                    query,
+                    session_id=session_id,
+                    actor_context=actor_context,
+                )
                 if result and result.strip():
                     parts.append(result)
             except Exception as e:
@@ -189,11 +224,22 @@ class MemoryManager:
                 )
         return "\n\n".join(parts)
 
-    def queue_prefetch_all(self, query: str, *, session_id: str = "") -> None:
+    def queue_prefetch_all(
+        self,
+        query: str,
+        *,
+        session_id: str = "",
+        actor_context: Dict[str, Any] | None = None,
+    ) -> None:
         """Queue background prefetch on all providers for the next turn."""
         for provider in self._providers:
             try:
-                provider.queue_prefetch(query, session_id=session_id)
+                self._call_provider_method(
+                    provider.queue_prefetch,
+                    query,
+                    session_id=session_id,
+                    actor_context=actor_context,
+                )
             except Exception as e:
                 logger.debug(
                     "Memory provider '%s' queue_prefetch failed (non-fatal): %s",
@@ -216,11 +262,24 @@ class MemoryManager:
 
     # -- Sync ----------------------------------------------------------------
 
-    def sync_all(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
+    def sync_all(
+        self,
+        user_content: str,
+        assistant_content: str,
+        *,
+        session_id: str = "",
+        actor_context: Dict[str, Any] | None = None,
+    ) -> None:
         """Sync a completed turn to all providers."""
         for provider in self._providers:
             try:
-                provider.sync_turn(user_content, assistant_content, session_id=session_id)
+                self._call_provider_method(
+                    provider.sync_turn,
+                    user_content,
+                    assistant_content,
+                    session_id=session_id,
+                    actor_context=actor_context,
+                )
             except Exception as e:
                 logger.warning(
                     "Memory provider '%s' sync_turn failed: %s",
@@ -321,7 +380,14 @@ class MemoryManager:
                 )
         return "\n\n".join(parts)
 
-    def on_memory_write(self, action: str, target: str, content: str) -> None:
+    def on_memory_write(
+        self,
+        action: str,
+        target: str,
+        content: str,
+        *,
+        actor_context: Dict[str, Any] | None = None,
+    ) -> None:
         """Notify external providers when the built-in memory tool writes.
 
         Skips the builtin provider itself (it's the source of the write).
@@ -330,7 +396,13 @@ class MemoryManager:
             if provider.name == "builtin":
                 continue
             try:
-                provider.on_memory_write(action, target, content)
+                self._call_provider_method(
+                    provider.on_memory_write,
+                    action,
+                    target,
+                    content,
+                    actor_context=actor_context,
+                )
             except Exception as e:
                 logger.debug(
                     "Memory provider '%s' on_memory_write failed: %s",

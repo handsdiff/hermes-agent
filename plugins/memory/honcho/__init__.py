@@ -202,6 +202,7 @@ class HonchoMemoryProvider(MemoryProvider):
 
         # Base context cache — refreshed on context_cadence, not frozen
         self._base_context_cache: Optional[str] = None
+        self._base_context_cache_by_actor: dict[tuple[str, str, str], str] = {}
         self._base_context_lock = threading.Lock()
 
         # B5: Cost-awareness turn counting and cadence
@@ -219,6 +220,7 @@ class HonchoMemoryProvider(MemoryProvider):
         # Liveness + observability state
         self._prefetch_thread_started_at: float = 0.0   # monotonic ts of current thread
         self._prefetch_result_fired_at: int = -999      # turn the pending result was fired at
+        self._prefetch_results_by_actor: dict[tuple[str, str, str], tuple[str, int]] = {}
         self._dialectic_empty_streak: int = 0           # consecutive empty returns
 
         # Port #1957: lazy session init for tools-only mode
@@ -369,6 +371,83 @@ class HonchoMemoryProvider(MemoryProvider):
             if callable(setter):
                 setter(self._actor_context)
 
+    def _turn_actor_context(self, actor_context: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Return an immutable per-operation actor snapshot."""
+        return dict(actor_context if actor_context is not None else (self._actor_context or {}))
+
+    def _actor_cache_key(
+        self,
+        actor_context: dict[str, Any] | None = None,
+    ) -> tuple[str, str, str]:
+        """Actor-scoped cache key for shared gateway sessions."""
+        ctx = self._turn_actor_context(actor_context)
+        if not self._actor_runtime_enabled:
+            return (self._session_key or "", "legacy", "legacy")
+        actor_peer = ""
+        if self._manager:
+            try:
+                actor_peer = self._manager.current_actor_peer_id(actor_context=ctx)
+            except Exception:
+                actor_peer = ""
+        if not actor_peer:
+            actor_peer = str(
+                ctx.get("peer_id")
+                or ctx.get("person_id")
+                or ctx.get("platform_user_id")
+                or "system-unknown"
+            )
+        agent_peer = str(ctx.get("agent_peer_id") or "agent-unknown")
+        return (self._session_key or "", actor_peer, agent_peer)
+
+    def _actor_kwargs(self, actor_context: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Manager kwargs for actor-aware calls, preserving legacy expectations."""
+        if not self._actor_runtime_enabled:
+            return {}
+        return {"actor_context": self._turn_actor_context(actor_context)}
+
+    def _get_base_context_cache(self, actor_context: dict[str, Any] | None = None) -> Optional[str]:
+        if not self._actor_runtime_enabled:
+            return self._base_context_cache
+        return self._base_context_cache_by_actor.get(self._actor_cache_key(actor_context))
+
+    def _set_base_context_cache(self, value: str, actor_context: dict[str, Any] | None = None) -> None:
+        if not self._actor_runtime_enabled:
+            self._base_context_cache = value
+            return
+        self._base_context_cache_by_actor[self._actor_cache_key(actor_context)] = value
+
+    def _pop_prefetch_result(
+        self,
+        actor_context: dict[str, Any] | None = None,
+    ) -> tuple[str, int]:
+        if not self._actor_runtime_enabled:
+            with self._prefetch_lock:
+                result = self._prefetch_result
+                fired_at = self._prefetch_result_fired_at
+                self._prefetch_result = ""
+                self._prefetch_result_fired_at = -999
+            return result, fired_at
+        key = self._actor_cache_key(actor_context)
+        with self._prefetch_lock:
+            return self._prefetch_results_by_actor.pop(key, ("", -999))
+
+    def _store_prefetch_result(
+        self,
+        result: str,
+        fired_at: int,
+        actor_context: dict[str, Any] | None = None,
+    ) -> None:
+        if not result:
+            return
+        if not self._actor_runtime_enabled:
+            with self._prefetch_lock:
+                self._prefetch_result = result
+                self._prefetch_result_fired_at = fired_at
+            return
+        key = self._actor_cache_key(actor_context)
+        with self._prefetch_lock:
+            self._prefetch_results_by_actor[key] = (result, fired_at)
+
     def _do_session_init(self, cfg, session_id: str, **kwargs) -> None:
         """Shared session initialization logic for both eager and lazy paths."""
         from plugins.memory.honcho.client import get_honcho_client
@@ -399,7 +478,10 @@ class HonchoMemoryProvider(MemoryProvider):
         logger.debug("Honcho session key resolved: %s", self._session_key)
 
         # Create session eagerly
-        session = self._manager.get_or_create(self._session_key)
+        session = self._manager.get_or_create(
+            self._session_key,
+            actor_context=self._actor_context,
+        )
         self._session_initialized = True
 
         # ----- B6: Memory file migration (one-time, for new sessions) -----
@@ -433,7 +515,10 @@ class HonchoMemoryProvider(MemoryProvider):
         # consumes the result directly.
         if self._recall_mode in ("context", "hybrid"):
             try:
-                self._manager.prefetch_context(self._session_key)
+                self._manager.prefetch_context(
+                    self._session_key,
+                    actor_context=self._actor_context,
+                )
             except Exception as e:
                 logger.debug("Honcho context prewarm failed: %s", e)
 
@@ -444,15 +529,20 @@ class HonchoMemoryProvider(MemoryProvider):
 
             def _prewarm_dialectic() -> None:
                 try:
-                    r = self._run_dialectic_depth(_prewarm_query)
+                    r = self._run_dialectic_depth(
+                        _prewarm_query,
+                        actor_context=self._actor_context,
+                    )
                 except Exception as exc:
                     logger.debug("Honcho dialectic prewarm failed: %s", exc)
                     self._dialectic_empty_streak += 1
                     return
                 if r and r.strip():
-                    with self._prefetch_lock:
-                        self._prefetch_result = r
-                        self._prefetch_result_fired_at = 0
+                    self._store_prefetch_result(
+                        r,
+                        0,
+                        actor_context=self._actor_context,
+                    )
                     # Treat prewarm as turn 0 so cadence gating starts clean.
                     self._last_dialectic_turn = 0
                     self._dialectic_empty_streak = 0
@@ -580,7 +670,13 @@ class HonchoMemoryProvider(MemoryProvider):
 
         return header
 
-    def prefetch(self, query: str, *, session_id: str = "") -> str:
+    def prefetch(
+        self,
+        query: str,
+        *,
+        session_id: str = "",
+        actor_context: dict[str, Any] | None = None,
+    ) -> str:
         """Return base context (representation + card) plus dialectic supplement.
 
         Assembles two layers:
@@ -604,34 +700,43 @@ class HonchoMemoryProvider(MemoryProvider):
         if self._is_trivial_prompt(query):
             return ""
 
+        actor_context_snapshot = self._turn_actor_context(actor_context)
         parts = []
 
         # ----- Layer 1: Base context (representation + card) -----
         # On first call, fetch synchronously so turn 1 isn't empty.
         # After that, serve from cache and refresh in background on cadence.
         with self._base_context_lock:
-            if self._base_context_cache is None:
+            cached_context = self._get_base_context_cache(actor_context_snapshot)
+            if cached_context is None:
                 # First call — synchronous fetch
                 try:
                     ctx = self._manager.get_prefetch_context(
                         self._session_key,
                         legacy_peer_ids=self._legacy_peer_ids,
+                        actor_context=actor_context_snapshot,
                     )
-                    self._base_context_cache = self._format_first_turn_context(ctx) if ctx else ""
+                    self._set_base_context_cache(
+                        self._format_first_turn_context(ctx) if ctx else "",
+                        actor_context_snapshot,
+                    )
                     self._last_context_turn = self._turn_count
                 except Exception as e:
                     logger.debug("Honcho base context fetch failed: %s", e)
-                    self._base_context_cache = ""
-            base_context = self._base_context_cache
+                    self._set_base_context_cache("", actor_context_snapshot)
+            base_context = self._get_base_context_cache(actor_context_snapshot) or ""
 
         # Check if background context prefetch has a fresher result
         if self._manager:
-            fresh_ctx = self._manager.pop_context_result(self._session_key)
+            fresh_ctx = self._manager.pop_context_result(
+                self._session_key,
+                actor_context=actor_context_snapshot,
+            )
             if fresh_ctx:
                 formatted = self._format_first_turn_context(fresh_ctx)
                 if formatted:
                     with self._base_context_lock:
-                        self._base_context_cache = formatted
+                        self._set_base_context_cache(formatted, actor_context_snapshot)
                     base_context = formatted
 
         if base_context:
@@ -647,7 +752,11 @@ class HonchoMemoryProvider(MemoryProvider):
         # Skip if the session-start prewarm already filled _prefetch_result —
         # firing another .chat() would be duplicate work.
         with self._prefetch_lock:
-            _prewarm_landed = bool(self._prefetch_result)
+            _prewarm_landed = (
+                bool(self._prefetch_result)
+                if not self._actor_runtime_enabled
+                else self._actor_cache_key(actor_context_snapshot) in self._prefetch_results_by_actor
+            )
         if _prewarm_landed and self._last_dialectic_turn == -999:
             self._last_dialectic_turn = self._turn_count
 
@@ -659,15 +768,20 @@ class HonchoMemoryProvider(MemoryProvider):
 
             def _run_first_turn() -> None:
                 try:
-                    r = self._run_dialectic_depth(query)
+                    r = self._run_dialectic_depth(
+                        query,
+                        actor_context=actor_context_snapshot,
+                    )
                 except Exception as exc:
                     logger.debug("Honcho first-turn dialectic failed: %s", exc)
                     self._dialectic_empty_streak += 1
                     return
                 if r and r.strip():
-                    with self._prefetch_lock:
-                        self._prefetch_result = r
-                        self._prefetch_result_fired_at = _fired_at
+                    self._store_prefetch_result(
+                        r,
+                        _fired_at,
+                        actor_context=actor_context_snapshot,
+                    )
                     # Advance cadence only on a non-empty result so the next
                     # turn retries when the call returned nothing.
                     self._last_dialectic_turn = _fired_at
@@ -690,11 +804,7 @@ class HonchoMemoryProvider(MemoryProvider):
 
         if self._prefetch_thread and self._prefetch_thread.is_alive():
             self._prefetch_thread.join(timeout=3.0)
-        with self._prefetch_lock:
-            dialectic_result = self._prefetch_result
-            fired_at = self._prefetch_result_fired_at
-            self._prefetch_result = ""
-            self._prefetch_result_fired_at = -999
+        dialectic_result, fired_at = self._pop_prefetch_result(actor_context_snapshot)
 
         # Discard stale pending results: if the fire happened more than
         # cadence × multiplier turns ago (e.g. a run of trivial-prompt turns
@@ -735,7 +845,13 @@ class HonchoMemoryProvider(MemoryProvider):
             truncated = truncated[:last_space]
         return truncated + " …"
 
-    def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
+    def queue_prefetch(
+        self,
+        query: str,
+        *,
+        session_id: str = "",
+        actor_context: dict[str, Any] | None = None,
+    ) -> None:
         """Fire background prefetch threads for the upcoming turn.
 
         B5: Checks cadence independently for dialectic and context refresh.
@@ -753,11 +869,17 @@ class HonchoMemoryProvider(MemoryProvider):
         if self._is_trivial_prompt(query):
             return
 
+        actor_context_snapshot = self._turn_actor_context(actor_context)
+
         # ----- Context refresh (base layer) — independent cadence -----
         if self._context_cadence <= 1 or (self._turn_count - self._last_context_turn) >= self._context_cadence:
             self._last_context_turn = self._turn_count
             try:
-                self._manager.prefetch_context(self._session_key, query)
+                self._manager.prefetch_context(
+                    self._session_key,
+                    query,
+                    actor_context=actor_context_snapshot,
+                )
             except Exception as e:
                 logger.debug("Honcho context prefetch failed: %s", e)
 
@@ -787,15 +909,20 @@ class HonchoMemoryProvider(MemoryProvider):
 
         def _run():
             try:
-                result = self._run_dialectic_depth(query)
+                result = self._run_dialectic_depth(
+                    query,
+                    actor_context=actor_context_snapshot,
+                )
             except Exception as e:
                 logger.debug("Honcho prefetch failed: %s", e)
                 self._dialectic_empty_streak += 1
                 return
             if result and result.strip():
-                with self._prefetch_lock:
-                    self._prefetch_result = result
-                    self._prefetch_result_fired_at = _fired_at
+                self._store_prefetch_result(
+                    result,
+                    _fired_at,
+                    actor_context=actor_context_snapshot,
+                )
                 self._last_dialectic_turn = _fired_at
                 self._dialectic_empty_streak = 0
             else:
@@ -980,7 +1107,12 @@ class HonchoMemoryProvider(MemoryProvider):
         # Long enough even without structure
         return len(result.strip()) > 300
 
-    def _run_dialectic_depth(self, query: str) -> str:
+    def _run_dialectic_depth(
+        self,
+        query: str,
+        *,
+        actor_context: dict[str, Any] | None = None,
+    ) -> str:
         """Execute up to dialecticDepth .chat() calls with conditional bail-out.
 
         Cold start (no base context): general user-oriented query.
@@ -991,7 +1123,8 @@ class HonchoMemoryProvider(MemoryProvider):
         if not self._manager or not self._session_key:
             return ""
 
-        is_cold = not self._base_context_cache
+        actor_context_snapshot = self._turn_actor_context(actor_context)
+        is_cold = not self._get_base_context_cache(actor_context_snapshot)
         results: list[str] = []
 
         for i in range(self._dialectic_depth):
@@ -1013,6 +1146,7 @@ class HonchoMemoryProvider(MemoryProvider):
                 self._session_key, prompt,
                 reasoning_level=level,
                 peer="user",
+                actor_context=actor_context_snapshot,
             )
             results.append(result or "")
 
@@ -1048,8 +1182,8 @@ class HonchoMemoryProvider(MemoryProvider):
     def on_turn_start(self, turn_number: int, message: str, **kwargs) -> None:
         """Track turn count for cadence and injection_frequency logic."""
         self._turn_count = turn_number
-        if self._actor_runtime_enabled and kwargs.get("actor_context"):
-            self.set_actor_context(kwargs.get("actor_context"))
+        if self._actor_runtime_enabled:
+            self.set_actor_context(kwargs.get("actor_context") or {})
 
     @staticmethod
     def _chunk_message(content: str, limit: int) -> list[str]:
@@ -1096,7 +1230,14 @@ class HonchoMemoryProvider(MemoryProvider):
 
         return chunks
 
-    def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
+    def sync_turn(
+        self,
+        user_content: str,
+        assistant_content: str,
+        *,
+        session_id: str = "",
+        actor_context: dict[str, Any] | None = None,
+    ) -> None:
         """Record the conversation turn in Honcho (non-blocking).
 
         Messages exceeding the Honcho API limit (default 25k chars) are
@@ -1106,17 +1247,33 @@ class HonchoMemoryProvider(MemoryProvider):
             return
 
         msg_limit = self._config.message_max_chars if self._config else 25000
+        actor_context_snapshot = self._turn_actor_context(actor_context)
+        user_peer_id = None
+        if self._actor_runtime_enabled:
+            try:
+                user_peer_id = self._manager.current_actor_peer_id(
+                    actor_context=actor_context_snapshot,
+                )
+            except Exception:
+                user_peer_id = actor_context_snapshot.get("peer_id")
 
         def _sync():
             try:
-                session = self._manager.get_or_create(self._session_key)
-                user_peer_id = None
+                session = self._manager.get_or_create(
+                    self._session_key,
+                    actor_context=actor_context_snapshot,
+                )
+                turn_user_peer_id = user_peer_id
                 if self._actor_runtime_enabled:
-                    user_peer_id = self._manager.current_actor_peer_id(session)
-                    self._manager._ensure_session_peer(session, user_peer_id)
+                    if not turn_user_peer_id:
+                        turn_user_peer_id = self._manager.current_actor_peer_id(
+                            session,
+                            actor_context=actor_context_snapshot,
+                        )
+                    self._manager._ensure_session_peer(session, turn_user_peer_id)
                     self._manager._ensure_session_peer(session, session.assistant_peer_id)
                 for chunk in self._chunk_message(user_content, msg_limit):
-                    session.add_message("user", chunk, peer_id=user_peer_id)
+                    session.add_message("user", chunk, peer_id=turn_user_peer_id)
                 for chunk in self._chunk_message(assistant_content, msg_limit):
                     session.add_message("assistant", chunk, peer_id=session.assistant_peer_id if self._actor_runtime_enabled else None)
                 self._manager._flush_session(session)
@@ -1130,16 +1287,28 @@ class HonchoMemoryProvider(MemoryProvider):
         )
         self._sync_thread.start()
 
-    def on_memory_write(self, action: str, target: str, content: str) -> None:
+    def on_memory_write(
+        self,
+        action: str,
+        target: str,
+        content: str,
+        *,
+        actor_context: dict[str, Any] | None = None,
+    ) -> None:
         """Mirror built-in user profile writes as Honcho conclusions."""
         if action != "add" or target != "user" or not content:
             return
         if not self._manager or not self._session_key:
             return
+        actor_context_snapshot = self._turn_actor_context(actor_context)
 
         def _write():
             try:
-                self._manager.create_conclusion(self._session_key, content)
+                self._manager.create_conclusion(
+                    self._session_key,
+                    content,
+                    actor_context=actor_context_snapshot,
+                )
             except Exception as e:
                 logger.debug("Honcho memory mirror failed: %s", e)
 
@@ -1167,6 +1336,38 @@ class HonchoMemoryProvider(MemoryProvider):
             return []
         return list(ALL_TOOL_SCHEMAS)
 
+    def _authorize_tool_peer(
+        self,
+        peer: Any,
+        *,
+        write: bool = False,
+        actor_context: dict[str, Any] | None = None,
+    ) -> tuple[str, str | None]:
+        """Authorize a Honcho tool peer target under actor runtime.
+
+        In multiplayer sessions, peer scoping is a correctness boundary. A
+        non-owner may access the current speaker alias and read the AI alias,
+        but explicit cross-peer targeting requires trusted/owner authority.
+        """
+        peer_value = str(peer or "user").strip() or "user"
+        if not self._actor_runtime_enabled:
+            return peer_value, None
+
+        normalized = re.sub(r"[^a-zA-Z0-9_-]+", "-", peer_value).strip("-").lower()
+        is_user_alias = normalized in {"", "user"}
+        is_ai_alias = normalized == "ai"
+        authority = str((actor_context or {}).get("authority") or "").lower()
+        privileged = authority in {"owner", "trusted"}
+
+        if is_user_alias:
+            return "user", None
+        if is_ai_alias and not write:
+            return "ai", None
+        if privileged:
+            return peer_value, None
+
+        return "", "Honcho peer access denied: explicit peer targeting requires owner or trusted authority."
+
     def handle_tool_call(self, tool_name: str, args: dict, **kwargs) -> str:
         """Handle a Honcho tool call, with lazy session init for tools-only mode."""
 
@@ -1179,15 +1380,31 @@ class HonchoMemoryProvider(MemoryProvider):
             return tool_error("Honcho is not active for this session.")
 
         try:
+            actor_context_snapshot = self._turn_actor_context(kwargs.get("actor_context"))
             if tool_name == "honcho_profile":
-                peer = args.get("peer", "user")
                 card_update = args.get("card")
+                peer, denial = self._authorize_tool_peer(
+                    args.get("peer", "user"),
+                    write=bool(card_update),
+                    actor_context=actor_context_snapshot,
+                )
+                if denial:
+                    return tool_error(denial)
                 if card_update:
-                    result = self._manager.set_peer_card(self._session_key, card_update, peer=peer)
+                    result = self._manager.set_peer_card(
+                        self._session_key,
+                        card_update,
+                        peer=peer,
+                        **self._actor_kwargs(actor_context_snapshot),
+                    )
                     if result is None:
                         return tool_error("Failed to update peer card.")
                     return json.dumps({"result": f"Peer card updated ({len(result)} facts).", "card": result})
-                card = self._manager.get_peer_card(self._session_key, peer=peer)
+                card = self._manager.get_peer_card(
+                    self._session_key,
+                    peer=peer,
+                    **self._actor_kwargs(actor_context_snapshot),
+                )
                 if not card:
                     return json.dumps({"result": "No profile facts available yet."})
                 return json.dumps({"result": card})
@@ -1197,9 +1414,18 @@ class HonchoMemoryProvider(MemoryProvider):
                 if not query:
                     return tool_error("Missing required parameter: query")
                 max_tokens = min(int(args.get("max_tokens", 800)), 2000)
-                peer = args.get("peer", "user")
+                peer, denial = self._authorize_tool_peer(
+                    args.get("peer", "user"),
+                    actor_context=actor_context_snapshot,
+                )
+                if denial:
+                    return tool_error(denial)
                 result = self._manager.search_context(
-                    self._session_key, query, max_tokens=max_tokens, peer=peer
+                    self._session_key,
+                    query,
+                    max_tokens=max_tokens,
+                    peer=peer,
+                    **self._actor_kwargs(actor_context_snapshot),
                 )
                 if not result:
                     return json.dumps({"result": "No relevant context found."})
@@ -1209,20 +1435,35 @@ class HonchoMemoryProvider(MemoryProvider):
                 query = args.get("query", "")
                 if not query:
                     return tool_error("Missing required parameter: query")
-                peer = args.get("peer", "user")
+                peer, denial = self._authorize_tool_peer(
+                    args.get("peer", "user"),
+                    actor_context=actor_context_snapshot,
+                )
+                if denial:
+                    return tool_error(denial)
                 reasoning_level = args.get("reasoning_level")
                 result = self._manager.dialectic_query(
                     self._session_key, query,
                     reasoning_level=reasoning_level,
                     peer=peer,
+                    **self._actor_kwargs(actor_context_snapshot),
                 )
                 # Update cadence tracker so auto-injection respects the gap after an explicit call
                 self._last_dialectic_turn = self._turn_count
                 return json.dumps({"result": result or "No result from Honcho."})
 
             elif tool_name == "honcho_context":
-                peer = args.get("peer", "user")
-                ctx = self._manager.get_session_context(self._session_key, peer=peer)
+                peer, denial = self._authorize_tool_peer(
+                    args.get("peer", "user"),
+                    actor_context=actor_context_snapshot,
+                )
+                if denial:
+                    return tool_error(denial)
+                ctx = self._manager.get_session_context(
+                    self._session_key,
+                    peer=peer,
+                    **self._actor_kwargs(actor_context_snapshot),
+                )
                 if not ctx:
                     return json.dumps({"result": "No context available yet."})
                 parts = []
@@ -1244,7 +1485,13 @@ class HonchoMemoryProvider(MemoryProvider):
             elif tool_name == "honcho_conclude":
                 delete_id = (args.get("delete_id") or "").strip()
                 conclusion = args.get("conclusion", "").strip()
-                peer = args.get("peer", "user")
+                peer, denial = self._authorize_tool_peer(
+                    args.get("peer", "user"),
+                    write=True,
+                    actor_context=actor_context_snapshot,
+                )
+                if denial:
+                    return tool_error(denial)
 
                 has_delete_id = bool(delete_id)
                 has_conclusion = bool(conclusion)
@@ -1252,11 +1499,21 @@ class HonchoMemoryProvider(MemoryProvider):
                     return tool_error("Exactly one of conclusion or delete_id must be provided.")
 
                 if has_delete_id:
-                    ok = self._manager.delete_conclusion(self._session_key, delete_id, peer=peer)
+                    ok = self._manager.delete_conclusion(
+                        self._session_key,
+                        delete_id,
+                        peer=peer,
+                        **self._actor_kwargs(actor_context_snapshot),
+                    )
                     if ok:
                         return json.dumps({"result": f"Conclusion {delete_id} deleted."})
                     return tool_error(f"Failed to delete conclusion {delete_id}.")
-                ok = self._manager.create_conclusion(self._session_key, conclusion, peer=peer)
+                ok = self._manager.create_conclusion(
+                    self._session_key,
+                    conclusion,
+                    peer=peer,
+                    **self._actor_kwargs(actor_context_snapshot),
+                )
                 if ok:
                     return json.dumps({"result": f"Conclusion saved for {peer}: {conclusion}"})
                 return tool_error("Failed to save conclusion.")
