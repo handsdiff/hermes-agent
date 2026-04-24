@@ -189,6 +189,8 @@ so the configured `peerName: "user"` survives; strangers get transport-level pee
 Dual-reads legacy transport-level peer representations at init so pre-unification
 history isn't orphaned. Sets `chat_type="synthetic"` on the background process
 notification's synthetic SessionSource to prevent false-positive owner detection.
+Owner detection must normalize platform identity by value before checking untrusted
+platforms; fork-main routing tests use source shims whose `platform` is not hashable.
 
 **#9287 (cron-memory-peers):** Gives cron jobs memory via per-job Honcho peers
 (`cron-{name}`). Reverts #6995's `not cfg.peer_name` guard that blocked all `user_id`
@@ -292,4 +294,7 @@ tool. Fork-only because it's specific to the exe.dev proxy model and references
 `niyant@slate.ceo` as the platform admin contact. Auto-registers via
 `tools/registry.py:discover_builtin_tools()`; listed in `_HERMES_CORE_TOOLS` in
 `toolsets.py` so it's exposed to every platform. If provisioner isn't wired up, the
-manifest file is absent and the tool returns an explanatory empty result.
+manifest file is absent and the tool returns an explanatory empty result. Keep
+`tests/tools/test_registry.py`'s builtin discovery expectation in sync with this tool;
+on fork main the expected set should include both `integrations_tool` and, after
+merging #14884, `self_state_tool`.
