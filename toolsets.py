@@ -48,6 +48,8 @@ _HERMES_CORE_TOOLS = [
     "text_to_speech",
     # Planning & memory
     "todo", "memory",
+    # Runtime self-inspection across isolated sessions
+    "self_state",
     # Session history search
     "session_search",
     # Clarifying questions
@@ -177,6 +179,12 @@ TOOLSETS = {
     "memory": {
         "description": "Persistent memory across sessions (personal notes + user profile)",
         "tools": ["memory"],
+        "includes": []
+    },
+
+    "self_state": {
+        "description": "Read-only runtime self-inspection across sessions, local crons, and recent activity",
+        "tools": ["self_state"],
         "includes": []
     },
     
@@ -313,7 +321,7 @@ TOOLSETS = {
             "browser_type", "browser_scroll", "browser_back",
             "browser_press", "browser_get_images",
             "browser_vision", "browser_console", "browser_cdp", "browser_dialog",
-            "todo", "memory",
+            "todo", "memory", "self_state",
             "session_search",
             "execute_code", "delegate_task",
         ],
@@ -339,7 +347,7 @@ TOOLSETS = {
             "browser_press", "browser_get_images",
             "browser_vision", "browser_console", "browser_cdp", "browser_dialog",
             # Planning & memory
-            "todo", "memory",
+            "todo", "memory", "self_state",
             # Session history search
             "session_search",
             # Code execution + delegation
