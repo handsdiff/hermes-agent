@@ -695,6 +695,15 @@ class AIAgent:
         self._base_url_lower = value.lower() if value else ""
         self._base_url_hostname = base_url_hostname(value)
 
+    def set_actor_context(self, actor_context: Dict[str, Any] | None) -> None:
+        """Update per-turn gateway actor context on a cached agent."""
+        self._actor_context = dict(actor_context or {})
+        if getattr(self, "_memory_manager", None):
+            try:
+                self._memory_manager.set_actor_context(self._actor_context)
+            except Exception:
+                pass
+
     def __init__(
         self,
         base_url: str = None,
@@ -748,6 +757,7 @@ class AIAgent:
         thread_id: str = None,
         gateway_session_key: str = None,
         legacy_peer_ids: list[str] = None,
+        actor_context: Dict[str, Any] = None,
         skip_context_files: bool = False,
         skip_memory: bool = False,
         session_db=None,
@@ -823,6 +833,7 @@ class AIAgent:
         self._thread_id = thread_id
         self._gateway_session_key = gateway_session_key  # Stable per-chat key (e.g. agent:main:telegram:dm:123)
         self._legacy_peer_ids = legacy_peer_ids or []  # Historical transport-level peer IDs for owner dual-read
+        self._actor_context = dict(actor_context or {})
         # Pluggable print function — CLI replaces this with _cprint so that
         # raw ANSI status lines are routed through prompt_toolkit's renderer
         # instead of going directly to stdout where patch_stdout's StdoutProxy
@@ -1463,6 +1474,9 @@ class AIAgent:
             try:
                 # Read providers list; fall back to legacy single-string field
                 _mem_provider_names = (mem_config.get("providers", []) or []) if mem_config else []
+                _provider_config_explicit = bool(mem_config) and (
+                    "providers" in mem_config or "provider" in mem_config
+                )
                 if not _mem_provider_names and mem_config:
                     _legacy = mem_config.get("provider", "")
                     if _legacy:
@@ -1473,7 +1487,7 @@ class AIAgent:
                 # honcho plugin automatically.  Just having the config file
                 # is not enough — the user may have disabled Honcho or the
                 # file may be from a different tool.
-                if not _mem_provider_names:
+                if not _mem_provider_names and not _provider_config_explicit:
                     try:
                         from plugins.memory.honcho.client import HonchoClientConfig as _HCC
                         _hcfg = _HCC.from_global_config()
@@ -1537,6 +1551,8 @@ class AIAgent:
                             _init_kwargs["gateway_session_key"] = self._gateway_session_key
                         if self._legacy_peer_ids:
                             _init_kwargs["legacy_peer_ids"] = self._legacy_peer_ids
+                        if self._actor_context:
+                            _init_kwargs["actor_context"] = self._actor_context
                         # Profile identity for per-profile provider scoping
                         try:
                             from hermes_cli.profiles import get_active_profile_name
@@ -1546,6 +1562,8 @@ class AIAgent:
                         except Exception:
                             pass
                         self._memory_manager.initialize_all(**_init_kwargs)
+                        if self._actor_context:
+                            self._memory_manager.set_actor_context(self._actor_context)
                         logger.info("Memory providers %s activated", self._memory_manager.provider_names)
                     else:
                         self._memory_manager = None
@@ -9097,8 +9115,14 @@ class AIAgent:
         # and can gate context/dialectic refresh via contextCadence/dialecticCadence.
         if self._memory_manager:
             try:
+                if self._actor_context:
+                    self._memory_manager.set_actor_context(self._actor_context)
                 _turn_msg = original_user_message if isinstance(original_user_message, str) else ""
-                self._memory_manager.on_turn_start(self._user_turn_count, _turn_msg)
+                self._memory_manager.on_turn_start(
+                    self._user_turn_count,
+                    _turn_msg,
+                    actor_context=self._actor_context,
+                )
             except Exception:
                 pass
 

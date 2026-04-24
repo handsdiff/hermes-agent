@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import threading
 import time
@@ -224,6 +225,8 @@ class HonchoMemoryProvider(MemoryProvider):
         self._session_initialized = False
         self._lazy_init_kwargs: Optional[dict] = None
         self._lazy_init_session_id: Optional[str] = None
+        self._actor_runtime_enabled = False
+        self._actor_context: dict[str, Any] = {}
 
 
     @property
@@ -282,14 +285,12 @@ class HonchoMemoryProvider(MemoryProvider):
                 logger.debug("Honcho not configured — plugin inactive")
                 return
 
-            # Override peer_name with the caller-supplied user_id so each caller
-            # gets their own Honcho peer.  For owner sessions the gateway will
-            # stop passing user_id once user-unify ships — until then, owner
-            # messages fragment across transport-level peers (pre-#6995 behavior,
-            # preferable to the active stranger/cron pollution #6995 introduced).
-            _gw_user_id = kwargs.get("user_id")
-            if _gw_user_id:
-                cfg.peer_name = _gw_user_id
+            self._actor_context = dict(kwargs.get("actor_context") or {})
+            self._actor_runtime_enabled = self._is_actor_runtime_enabled(cfg)
+
+            # Gateway user_id is passed separately as runtime_user_peer_name.
+            # Do not mutate cfg.peer_name: explicit config remains stable, and
+            # actor-runtime mode uses structured per-turn actor_context.
 
 
             self._config = cfg
@@ -345,6 +346,29 @@ class HonchoMemoryProvider(MemoryProvider):
             logger.warning("Honcho init failed: %s", e)
             self._manager = None
 
+    @staticmethod
+    def _truthy(value: Any) -> bool:
+        return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+    def _is_actor_runtime_enabled(self, cfg) -> bool:
+        raw = cfg.raw or {}
+        host_raw = (raw.get("hosts") or {}).get(getattr(cfg, "host", "hermes"), {}) or {}
+        return (
+            self._truthy(host_raw.get("actorRuntime"))
+            or self._truthy(host_raw.get("actorRuntimeEnabled"))
+            or self._truthy(raw.get("actorRuntime"))
+            or self._truthy(raw.get("actorRuntimeEnabled"))
+            or self._truthy(os.getenv("HERMES_HONCHO_ACTOR_RUNTIME", ""))
+        )
+
+    def set_actor_context(self, actor_context: dict[str, Any] | None) -> None:
+        """Update the current gateway actor for cached-agent turns."""
+        self._actor_context = dict(actor_context or {})
+        if self._manager and self._actor_runtime_enabled:
+            setter = getattr(self._manager, "set_actor_context", None)
+            if callable(setter):
+                setter(self._actor_context)
+
     def _do_session_init(self, cfg, session_id: str, **kwargs) -> None:
         """Shared session initialization logic for both eager and lazy paths."""
         from plugins.memory.honcho.client import get_honcho_client
@@ -356,6 +380,8 @@ class HonchoMemoryProvider(MemoryProvider):
             config=cfg,
             context_tokens=cfg.context_tokens,
             runtime_user_peer_name=kwargs.get("user_id") or None,
+            actor_runtime_enabled=self._actor_runtime_enabled,
+            actor_context=self._actor_context,
         )
 
         # ----- B3: resolve_session_name -----
@@ -382,7 +408,12 @@ class HonchoMemoryProvider(MemoryProvider):
         # each one would flood the backend with short-lived duplicates instead
         # of performing a one-time migration.
         try:
-            if not session.messages and cfg.session_strategy != "per-session":
+            if self._actor_runtime_enabled:
+                logger.debug(
+                    "Honcho memory file migration skipped: actor runtime uses per-actor peers (%s)",
+                    self._session_key,
+                )
+            elif not session.messages and cfg.session_strategy != "per-session":
                 from hermes_constants import get_hermes_home
                 mem_dir = str(get_hermes_home() / "memories")
                 self._manager.migrate_memory_files(self._session_key, mem_dir)
@@ -407,7 +438,7 @@ class HonchoMemoryProvider(MemoryProvider):
                 logger.debug("Honcho context prewarm failed: %s", e)
 
             _prewarm_query = (
-                "Summarize what you know about this user. "
+                "Summarize what you know about the current speaker. "
                 "Focus on preferences, current projects, and working style."
             )
 
@@ -470,7 +501,13 @@ class HonchoMemoryProvider(MemoryProvider):
 
         rep = ctx.get("representation", "")
         if rep:
-            parts.append(f"## User Representation\n{rep}")
+            actor_label = "Current Speaker Representation" if ctx.get("actor_peer_id") else "User Representation"
+            actor_meta = ""
+            if ctx.get("actor_peer_id"):
+                display = ctx.get("actor_display_name") or ctx.get("actor_peer_id")
+                kind = ctx.get("actor_kind") or "peer"
+                actor_meta = f" ({kind}: {display})"
+            parts.append(f"## {actor_label}{actor_meta}\n{rep}")
 
         # Legacy representations from pre-unification transport-level peers.
         # Merged alongside the primary so the model sees full owner history.
@@ -480,7 +517,8 @@ class HonchoMemoryProvider(MemoryProvider):
 
         card = ctx.get("card", "")
         if card:
-            parts.append(f"## User Peer Card\n{card}")
+            card_label = "Current Speaker Peer Card" if ctx.get("actor_peer_id") else "User Peer Card"
+            parts.append(f"## {card_label}\n{card}")
 
         ai_rep = ctx.get("ai_representation", "")
         if ai_rep:
@@ -1010,6 +1048,8 @@ class HonchoMemoryProvider(MemoryProvider):
     def on_turn_start(self, turn_number: int, message: str, **kwargs) -> None:
         """Track turn count for cadence and injection_frequency logic."""
         self._turn_count = turn_number
+        if self._actor_runtime_enabled and kwargs.get("actor_context"):
+            self.set_actor_context(kwargs.get("actor_context"))
 
     @staticmethod
     def _chunk_message(content: str, limit: int) -> list[str]:
@@ -1070,10 +1110,15 @@ class HonchoMemoryProvider(MemoryProvider):
         def _sync():
             try:
                 session = self._manager.get_or_create(self._session_key)
+                user_peer_id = None
+                if self._actor_runtime_enabled:
+                    user_peer_id = self._manager.current_actor_peer_id(session)
+                    self._manager._ensure_session_peer(session, user_peer_id)
+                    self._manager._ensure_session_peer(session, session.assistant_peer_id)
                 for chunk in self._chunk_message(user_content, msg_limit):
-                    session.add_message("user", chunk)
+                    session.add_message("user", chunk, peer_id=user_peer_id)
                 for chunk in self._chunk_message(assistant_content, msg_limit):
-                    session.add_message("assistant", chunk)
+                    session.add_message("assistant", chunk, peer_id=session.assistant_peer_id if self._actor_runtime_enabled else None)
                 self._manager._flush_session(session)
             except Exception as e:
                 logger.debug("Honcho sync_turn failed: %s", e)

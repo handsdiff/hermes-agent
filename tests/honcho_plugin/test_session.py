@@ -365,6 +365,99 @@ class TestPeerLookupHelpers:
         }])
 
 
+class TestActorRuntimePeers:
+    class _Peer:
+        def __init__(self, peer_id):
+            self.id = peer_id
+
+        def message(self, content):
+            return {"peer_id": self.id, "content": content}
+
+    class _RemoteSession:
+        def __init__(self):
+            self.added_peers = []
+            self.messages = []
+
+        def add_peers(self, peers):
+            self.added_peers.append(peers)
+
+        def add_messages(self, messages):
+            self.messages.extend(messages)
+
+    def _make_manager_and_session(self):
+        from plugins.memory.honcho.client import HonchoClientConfig
+
+        cfg = HonchoClientConfig(peer_name="owner", ai_peer="agent-wait4test")
+        mgr = HonchoSessionManager(
+            config=cfg,
+            actor_runtime_enabled=True,
+            actor_context={
+                "peer_id": "human_discord_alice",
+                "peer_kind": "human",
+                "agent_peer_id": "agent_wait4test",
+            },
+        )
+        remote = self._RemoteSession()
+        session = HonchoSession(
+            key="discord:group:general",
+            user_peer_id="human_discord_alice",
+            assistant_peer_id="agent_wait4test",
+            honcho_session_id="discord-group-general",
+            peer_ids={"human_discord_alice", "agent_wait4test"},
+        )
+        mgr._cache[session.key] = session
+        mgr._sessions_cache[session.honcho_session_id] = remote
+        mgr._get_or_create_peer = lambda peer_id: self._Peer(peer_id)
+        return mgr, session, remote
+
+    def test_user_alias_tracks_current_actor_in_group_session(self):
+        mgr, session, _remote = self._make_manager_and_session()
+
+        assert mgr._resolve_peer_id(session, "user") == "human_discord_alice"
+
+        mgr.set_actor_context({
+            "peer_id": "human_discord_bob",
+            "peer_kind": "human",
+            "agent_peer_id": "agent_wait4test",
+        })
+
+        assert mgr._resolve_peer_id(session, "user") == "human_discord_bob"
+
+    def test_flush_preserves_actual_speaker_peer_ids(self):
+        mgr, session, remote = self._make_manager_and_session()
+
+        session.add_message("user", "Alice prefers terse updates", peer_id="human_discord_alice")
+        session.add_message("assistant", "Noted.", peer_id="agent_wait4test")
+        mgr._flush_session(session)
+
+        mgr.set_actor_context({
+            "peer_id": "human_discord_bob",
+            "peer_kind": "human",
+            "agent_peer_id": "agent_wait4test",
+        })
+        session.add_message("user", "Bob prefers detailed updates", peer_id="human_discord_bob")
+        session.add_message("assistant", "Got it.", peer_id="agent_wait4test")
+        mgr._flush_session(session)
+
+        assert [m["peer_id"] for m in remote.messages] == [
+            "human_discord_alice",
+            "agent_wait4test",
+            "human_discord_bob",
+            "agent_wait4test",
+        ]
+        assert "human_discord_bob" in session.peer_ids
+
+    def test_owner_actor_uses_configured_owner_peer(self):
+        mgr, session, _remote = self._make_manager_and_session()
+        mgr.set_actor_context({
+            "peer_id": "owner",
+            "peer_kind": "owner",
+            "agent_peer_id": "agent_wait4test",
+        })
+
+        assert mgr._resolve_peer_id(session, "user") == "owner"
+
+
 class TestConcludeToolDispatch:
     def test_conclude_schema_has_no_anyof(self):
         """anyOf/oneOf/allOf breaks Anthropic and Fireworks APIs — schema must be plain object."""
@@ -534,6 +627,62 @@ class TestConcludeToolDispatch:
 # ---------------------------------------------------------------------------
 # Provider init behavior: lazy vs eager in tools mode
 # ---------------------------------------------------------------------------
+
+
+class TestActorRuntimeConfig:
+    def test_actor_runtime_reads_host_block(self):
+        from plugins.memory.honcho.client import HonchoClientConfig
+
+        provider = HonchoMemoryProvider()
+        cfg = HonchoClientConfig(
+            host="hermes",
+            raw={"hosts": {"hermes": {"actorRuntime": True}}},
+        )
+
+        assert provider._is_actor_runtime_enabled(cfg) is True
+
+    def test_actor_runtime_reads_env_fallback(self, monkeypatch):
+        from plugins.memory.honcho.client import HonchoClientConfig
+
+        provider = HonchoMemoryProvider()
+        cfg = HonchoClientConfig(host="hermes", raw={})
+        monkeypatch.setenv("HERMES_HONCHO_ACTOR_RUNTIME", "true")
+
+        assert provider._is_actor_runtime_enabled(cfg) is True
+
+    def test_actor_runtime_skips_local_memory_file_migration(self):
+        from pathlib import Path
+        from unittest.mock import patch
+
+        from plugins.memory.honcho.client import HonchoClientConfig
+
+        cfg = HonchoClientConfig(
+            api_key="test-key",
+            enabled=True,
+            recall_mode="tools",
+            init_on_session_start=True,
+            raw={"hosts": {"hermes": {"actorRuntime": True}}},
+        )
+        provider = HonchoMemoryProvider()
+        mock_manager = MagicMock()
+        mock_session = MagicMock()
+        mock_session.messages = []
+        mock_manager.get_or_create.return_value = mock_session
+
+        with patch("plugins.memory.honcho.client.HonchoClientConfig.from_global_config", return_value=cfg), \
+             patch("plugins.memory.honcho.client.get_honcho_client", return_value=MagicMock()), \
+             patch("plugins.memory.honcho.session.HonchoSessionManager", return_value=mock_manager), \
+             patch("hermes_constants.get_hermes_home", return_value=Path("/tmp/hermes-test")):
+            provider.initialize(
+                session_id="actor-runtime-session",
+                actor_context={
+                    "peer_id": "human_discord_alice",
+                    "peer_kind": "human",
+                    "agent_peer_id": "agent_wait4test",
+                },
+            )
+
+        mock_manager.migrate_memory_files.assert_not_called()
 
 
 class TestToolsModeInitBehavior:

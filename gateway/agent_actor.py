@@ -207,6 +207,78 @@ def resolve_identity(db, source: Any, authority: str = "") -> str:
     )
 
 
+def _honcho_safe_id(value: Any) -> str:
+    """Return a Honcho-safe peer/session identifier component."""
+    cleaned = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(value or "").strip())
+    cleaned = re.sub(r"_+", "_", cleaned).strip("_")
+    return cleaned or "unknown"
+
+
+def _agent_peer_component() -> str:
+    for key in ("HUB_AGENT_ID", "AGENT_ID", "AGENT_NAME"):
+        value = os.getenv(key, "").strip()
+        if value:
+            return _honcho_safe_id(value)
+    return "main"
+
+
+def build_honcho_actor_context(
+    source: Any,
+    *,
+    person_id: str = "",
+    authority: str = "",
+    agent_id: str = "",
+) -> Dict[str, Any]:
+    """Build the per-turn actor identity passed to Honcho.
+
+    Hermes owns actor identity and authority. Honcho receives this as memory
+    attribution, so group-chat messages from different people land on different
+    peers while the assistant remains one stable peer.
+    """
+    platform = _platform_value(getattr(source, "platform", "")).strip().lower()
+    user_id = str(getattr(source, "user_id", "") or "").strip()
+    user_name = str(getattr(source, "user_name", "") or "").strip()
+    chat_id = str(getattr(source, "chat_id", "") or "").strip()
+    chat_type = str(getattr(source, "chat_type", "") or "").strip()
+    thread_id = str(getattr(source, "thread_id", "") or "").strip()
+    authority = authority or infer_platform_authority(source)
+
+    if authority == "owner":
+        peer_kind = "owner"
+        peer_id = "owner"
+    elif platform == "hub":
+        peer_kind = "hub_agent"
+        peer_id = f"hub_agent_{_honcho_safe_id(user_id or user_name)}"
+    elif platform == "cron":
+        peer_kind = "cron"
+        peer_id = f"cron_{_honcho_safe_id(user_id or user_name)}"
+    elif user_id:
+        peer_kind = "human"
+        peer_id = f"human_{_honcho_safe_id(platform)}_{_honcho_safe_id(user_id)}"
+    elif platform:
+        peer_kind = "system"
+        peer_id = f"system_{_honcho_safe_id(platform)}"
+    else:
+        peer_kind = "system"
+        peer_id = "system_unknown"
+
+    agent_component = _honcho_safe_id(agent_id or _agent_peer_component())
+    return {
+        "enabled": True,
+        "peer_id": peer_id,
+        "peer_kind": peer_kind,
+        "person_id": person_id or (f"{platform}:{user_id}" if platform and user_id else ""),
+        "authority": authority,
+        "platform": platform,
+        "platform_user_id": user_id,
+        "display_name": user_name,
+        "chat_id": chat_id,
+        "chat_type": chat_type,
+        "thread_id": thread_id,
+        "agent_peer_id": f"agent_{agent_component}",
+    }
+
+
 def record_inbound_event(
     db,
     *,

@@ -1,6 +1,7 @@
 import json
 
 from gateway.agent_actor import (
+    build_honcho_actor_context,
     build_state_packet,
     detect_public_broadcast_stop_directive,
     evaluate_send_message_policy,
@@ -81,6 +82,62 @@ def test_owner_authority_uses_generated_soul_owner_block(tmp_path, monkeypatch):
 
     assert owner_user_ids_for_platform("discord") == {"1417636184355766305"}
     assert infer_platform_authority(source) == "owner"
+
+
+def test_honcho_actor_context_scopes_group_senders_separately():
+    alice = SessionSource(
+        platform=Platform.DISCORD,
+        chat_id="general",
+        chat_type="group",
+        user_id="alice-1",
+        user_name="Alice",
+    )
+    bob = SessionSource(
+        platform=Platform.DISCORD,
+        chat_id="general",
+        chat_type="group",
+        user_id="bob-2",
+        user_name="Bob",
+    )
+
+    alice_ctx = build_honcho_actor_context(alice, authority="user", agent_id="wait4test")
+    bob_ctx = build_honcho_actor_context(bob, authority="user", agent_id="wait4test")
+
+    assert alice_ctx["peer_id"] == "human_discord_alice-1"
+    assert bob_ctx["peer_id"] == "human_discord_bob-2"
+    assert alice_ctx["peer_id"] != bob_ctx["peer_id"]
+    assert alice_ctx["agent_peer_id"] == "agent_wait4test"
+
+
+def test_honcho_actor_context_uses_owner_peer_for_owner():
+    source = SessionSource(
+        platform=Platform.DISCORD,
+        chat_id="general",
+        chat_type="group",
+        user_id="141",
+        user_name="hands",
+    )
+
+    ctx = build_honcho_actor_context(source, authority="owner", agent_id="wait4test")
+
+    assert ctx["peer_id"] == "owner"
+    assert ctx["peer_kind"] == "owner"
+    assert ctx["authority"] == "owner"
+
+
+def test_honcho_actor_context_distinguishes_hub_agents():
+    source = SessionSource(
+        platform=Platform.HUB,
+        chat_id="hub:speculator",
+        chat_type="dm",
+        user_id="speculator",
+        user_name="speculator",
+    )
+
+    ctx = build_honcho_actor_context(source, authority="system", agent_id="wait4test")
+
+    assert ctx["peer_id"] == "hub_agent_speculator"
+    assert ctx["peer_kind"] == "hub_agent"
 
 
 def test_owner_state_packet_includes_recent_cross_session_events(tmp_path):

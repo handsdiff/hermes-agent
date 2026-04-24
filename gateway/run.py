@@ -4252,9 +4252,11 @@ class GatewayRunner:
         inbound_person_id = ""
         inbound_authority = ""
         actor_state_packet = ""
+        honcho_actor_context = {}
         if self._session_db is not None:
             try:
                 from gateway.agent_actor import (
+                    build_honcho_actor_context,
                     infer_platform_authority,
                     maybe_record_directive_from_inbound,
                     record_inbound_event,
@@ -4279,6 +4281,11 @@ class GatewayRunner:
                     inbound_event_id=inbound_event_id,
                     person_id=inbound_person_id,
                     text=event.text or "",
+                    authority=inbound_authority,
+                )
+                honcho_actor_context = build_honcho_actor_context(
+                    source,
+                    person_id=inbound_person_id,
                     authority=inbound_authority,
                 )
             except Exception as _actor_exc:
@@ -4761,6 +4768,7 @@ class GatewayRunner:
                 run_generation=run_generation,
                 event_message_id=event.message_id,
                 channel_prompt=event.channel_prompt,
+                actor_context=honcho_actor_context,
             )
 
             # Stop persistent typing indicator now that the agent is done
@@ -9608,6 +9616,7 @@ class GatewayRunner:
         event_message_id: Optional[str] = None,
         channel_prompt: Optional[str] = None,
         ephemeral_user_context: Optional[str] = None,
+        actor_context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Run the agent with the given message and context.
@@ -10178,6 +10187,7 @@ class GatewayRunner:
                     thread_id=source.thread_id,
                     gateway_session_key=session_key,
                     legacy_peer_ids=_legacy_peers,
+                    actor_context=actor_context or {},
                     session_db=self._session_db,
                     fallback_model=self._fallback_model,
                 )
@@ -10186,6 +10196,10 @@ class GatewayRunner:
                         _cache[session_key] = (agent, _sig)
                         self._enforce_agent_cache_cap()
                 logger.debug("Created new agent for session %s (sig=%s)", session_key, _sig)
+
+            _set_actor_context = getattr(agent, "set_actor_context", None)
+            if callable(_set_actor_context):
+                _set_actor_context(actor_context or {})
 
             # Per-message state — callbacks and reasoning config change every
             # turn and must not be baked into the cached agent constructor.

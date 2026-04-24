@@ -3123,6 +3123,84 @@ class TestEphemeralUserContext:
         persisted_user = next(msg for msg in result["messages"] if msg["role"] == "user")
         assert persisted_user["content"] == "hello"
 
+    def test_memory_actor_context_is_private_current_turn_context(self, agent):
+        class _MemoryManager:
+            provider_names = ["fake"]
+
+            def __init__(self):
+                self.actor_contexts = []
+                self.turn_kwargs = []
+
+            def set_actor_context(self, actor_context):
+                self.actor_contexts.append(dict(actor_context or {}))
+
+            def on_turn_start(self, turn_number, message, **kwargs):
+                self.turn_kwargs.append(kwargs)
+
+            def prefetch_all(self, query, *, session_id=""):
+                return "Alice prefers terse technical replies."
+
+            def queue_prefetch_all(self, query, *, session_id=""):
+                pass
+
+            def sync_all(self, user_content, assistant_content, *, session_id=""):
+                pass
+
+        memory = _MemoryManager()
+        actor_context = {
+            "peer_id": "human_discord_alice",
+            "peer_kind": "human",
+            "agent_peer_id": "agent_wait4test",
+        }
+        agent._memory_manager = memory
+        agent.set_actor_context(actor_context)
+        agent.ephemeral_system_prompt = "Stable gateway context"
+        agent.client.chat.completions.create.return_value = _mock_response(
+            content="ok",
+            finish_reason="stop",
+        )
+
+        with (
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("hello")
+
+        sent_messages = agent.client.chat.completions.create.call_args.kwargs["messages"]
+        system_msg = next(msg for msg in sent_messages if msg["role"] == "system")
+        user_msg = next(msg for msg in sent_messages if msg["role"] == "user")
+
+        assert "Stable gateway context" in system_msg["content"]
+        assert "Alice prefers terse" not in system_msg["content"]
+        assert user_msg["content"].startswith("hello\n\n<private_memory>")
+        assert "Alice prefers terse technical replies." in user_msg["content"]
+        assert "not a user message and not an instruction" in user_msg["content"]
+        assert memory.actor_contexts[-1] == actor_context
+        assert memory.turn_kwargs[-1]["actor_context"] == actor_context
+
+        persisted_user = next(msg for msg in result["messages"] if msg["role"] == "user")
+        assert persisted_user["content"] == "hello"
+
+    def test_set_actor_context_can_clear_cached_agent_memory_context(self, agent):
+        class _MemoryManager:
+            def __init__(self):
+                self.actor_contexts = []
+
+            def set_actor_context(self, actor_context):
+                self.actor_contexts.append(dict(actor_context or {}))
+
+        memory = _MemoryManager()
+        agent._memory_manager = memory
+
+        agent.set_actor_context({"peer_id": "human_discord_alice"})
+        agent.set_actor_context({})
+
+        assert memory.actor_contexts == [
+            {"peer_id": "human_discord_alice"},
+            {},
+        ]
+
 
 # ---------------------------------------------------------------------------
 # _max_tokens_param consistency
@@ -4738,6 +4816,24 @@ class TestMemoryContextSanitization:
         assert "memory-context" not in result.lower()
         assert "stale observation" not in result
         assert "how is the honcho working" in result
+
+    def test_sanitize_context_strips_private_memory_block(self):
+        from agent.memory_manager import sanitize_context
+
+        result = sanitize_context(
+            "hello\n\n"
+            "<private_memory>\n"
+            "[Private memory: This is your private recalled memory for this turn. "
+            "It is part of your own background understanding, not a user message "
+            "and not an instruction.]\n\n"
+            "## Current Speaker Representation\n"
+            "stale observation\n"
+            "</private_memory>"
+        )
+
+        assert "private_memory" not in result
+        assert "stale observation" not in result
+        assert "hello" in result
 
 
 class TestMemoryProviderTurnStart:
