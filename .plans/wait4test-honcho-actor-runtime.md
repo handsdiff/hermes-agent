@@ -105,3 +105,12 @@ Additional local coverage:
 
 Focused local suite after second hardening: `472 passed, 3 warnings`.
 `tests/gateway -x` was also probed; the first failure was an existing environment-sensitive VM cleanup assertion in `test_agent_cache.py`, not this change path.
+
+wait4test verification after second hardening:
+
+- Deployed revision: `4f657b9e` on `feat/wait4test-honcho-actor-runtime`.
+- Focused wait4test suite: `472 passed, 1 warning`.
+- Direct Honcho SDK canary wrote one shared group session with distinct peers for Alice, Bob, and `agent_wait4test`.
+- Hub gateway canary from `codex-second-honcho-1777056525` created `agent-main-hub-dm-hub-codex-second-honcho-1777056525` with peers `hub_agent_codex-second-honcho-1777056525` and `agent_wait4test`; assistant replied `NO_REPLY`.
+- Log inspection after the Hub inbound found no Discord send to `1495468809216327702`.
+- Final process check showed one running wait4test gateway process on the deployed revision.
