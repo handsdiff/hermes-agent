@@ -189,14 +189,30 @@ class TestMirrorToSession:
         assert (sessions_dir / "sess_topic_a.jsonl").exists()
         assert not (sessions_dir / "sess_topic_b.jsonl").exists()
 
-    def test_no_matching_session(self, tmp_path):
+    def test_no_matching_session_creates_one(self, tmp_path):
+        """When no session exists for a target channel, mirror creates a
+        shared-channel session so the outbound becomes the first entry in
+        that channel's transcript. Fixes the class of bugs where a cron-
+        originated post doesn't appear in the channel's session and the
+        agent later denies having made it when asked."""
         sessions_dir, index_file = _setup_sessions(tmp_path, {})
 
+        # Avoid touching the real SQLite DB; just exercise the sessions.json
+        # + JSONL path. The SQLite branch is error-tolerant by design.
         with patch.object(mirror_mod, "_SESSIONS_DIR", sessions_dir), \
-             patch.object(mirror_mod, "_SESSIONS_INDEX", index_file):
+             patch.object(mirror_mod, "_SESSIONS_INDEX", index_file), \
+             patch.object(mirror_mod, "_append_to_sqlite"):
             result = mirror_to_session("telegram", "99999", "Hello!")
 
-        assert result is False
+        assert result is True
+        # Index now carries the new shared-channel session
+        with open(index_file, encoding="utf-8") as f:
+            index = json.load(f)
+        assert any(
+            (entry.get("origin") or {}).get("chat_id") == "99999"
+            and (entry.get("origin") or {}).get("platform") == "telegram"
+            for entry in index.values()
+        )
 
     def test_error_returns_false(self, tmp_path):
         with patch("gateway.mirror._find_session_id", side_effect=Exception("boom")):
