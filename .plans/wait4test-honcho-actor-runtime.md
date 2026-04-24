@@ -34,7 +34,11 @@ Goal: make Honcho memory multiplayer-safe by treating Hermes runtime identity as
   - `human_discord_alice-eval`
   - `human_discord_bob-eval`
   - `agent_wait4test`
+- Fresh Hub gateway canary delivered to wait4test and created Honcho session `agent-main-hub-dm-hub-codex-honcho-eval-a` with peer-attributed messages:
+  - `hub_agent_codex-honcho-eval-a`: canary inbound
+  - `agent_wait4test`: `NO_REPLY`
+- The persisted gateway transcript for the Hub canary contains the normal user turn and assistant `NO_REPLY`; private memory context was not persisted into the session transcript.
 
 ## Remaining Caveat
 
-A fresh synthetic Hub injection was blocked by Hub registration/access controls from the control environment. The deployed wait4test gateway is running with Honcho initialized, and the final direct provider eval covers the critical actor-attributed memory path.
+wait4test was processing older Hub backlog during the canary and hit unrelated provider/service pressure: several Honcho dialectic queries timed out at 60s, Discord reconnects timed out before recovering, and model calls saw transient 429s. The actor-attributed Honcho write path still passed.
