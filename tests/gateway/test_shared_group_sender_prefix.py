@@ -44,12 +44,15 @@ async def test_preprocess_prefixes_sender_for_shared_non_thread_group_session():
 
 
 @pytest.mark.asyncio
-async def test_preprocess_keeps_plain_text_for_default_group_sessions():
+async def test_preprocess_keeps_plain_text_for_per_user_group_sessions():
+    """Explicit opt-in to per-user group isolation reverts to un-prefixed text
+    (the session is private to this one user, so no disambiguation needed)."""
     runner = _make_runner(
         GatewayConfig(
             platforms={
                 Platform.TELEGRAM: PlatformConfig(enabled=True, token="fake"),
             },
+            group_sessions_per_user=True,
         )
     )
     source = SessionSource(

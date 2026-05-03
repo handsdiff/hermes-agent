@@ -420,7 +420,7 @@ class GatewayConfig:
     stt_enabled: bool = True  # Whether to auto-transcribe inbound voice messages
 
     # Session isolation in shared chats
-    group_sessions_per_user: bool = True  # Isolate group/channel sessions per participant when user IDs are available
+    group_sessions_per_user: bool = False  # Shared-channel sessions (default). Each agent sees the full channel transcript across all participants, including its own responses to other humans. Set to True for per-user isolation — but note that isolated sessions hide the agent's own channel history, so agents can end up denying prior public statements when asked about them by a different user.
     thread_sessions_per_user: bool = False  # When False (default), threads are shared across all participants
 
     # Unauthorized DM policy

@@ -3974,10 +3974,18 @@ class DiscordAdapter(BasePlatformAdapter):
 
         reply_to_id = None
         reply_to_text = None
+        reply_to_author = None
         if message.reference:
             reply_to_id = str(message.reference.message_id)
             if message.reference.resolved:
                 reply_to_text = getattr(message.reference.resolved, "content", None) or None
+                _replied_author = getattr(message.reference.resolved, "author", None)
+                if _replied_author is not None:
+                    reply_to_author = (
+                        getattr(_replied_author, "display_name", None)
+                        or getattr(_replied_author, "name", None)
+                        or None
+                    )
 
         event = MessageEvent(
             text=event_text,
@@ -3989,6 +3997,7 @@ class DiscordAdapter(BasePlatformAdapter):
             media_types=media_types,
             reply_to_message_id=reply_to_id,
             reply_to_text=reply_to_text,
+            reply_to_author=reply_to_author,
             timestamp=message.created_at,
             auto_skill=_skills,
             channel_prompt=_channel_prompt,
