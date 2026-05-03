@@ -781,6 +781,8 @@ SUPPORTED_DOCUMENT_TYPES = {
     ".cfg": "text/plain",
     ".zip": "application/zip",
     ".epub": "application/epub+zip",
+    ".html": "text/html",
+    ".htm": "text/html",
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
