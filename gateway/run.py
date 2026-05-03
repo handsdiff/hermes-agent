@@ -6177,7 +6177,10 @@ class GatewayRunner:
         if not history and source.platform and source.platform != Platform.LOCAL and source.platform != Platform.WEBHOOK:
             platform_name = source.platform.value
             env_key = _home_target_env_var(platform_name)
-            if not os.getenv(env_key):
+            has_home = os.getenv(env_key) or (
+                self.config and self.config.get_home_channel(source.platform)
+            )
+            if not has_home:
                 # Slack dispatches all Hermes commands through a single
                 # parent slash command `/hermes`; bare `/sethome` is not
                 # registered and would fail with "app did not respond".
@@ -8077,6 +8080,16 @@ class GatewayRunner:
         env_key = _home_target_env_var(platform_name)
         thread_env_key = _home_thread_env_var(platform_name)
         thread_id = source.thread_id
+
+        # If a home channel is already set, reject. Home channel is set during
+        # provisioning or on first use and cannot be changed via /sethome.
+        existing_home = os.environ.get(env_key, "").strip()
+        if not existing_home and self.config and source.platform:
+            hc = self.config.get_home_channel(source.platform)
+            if hc:
+                existing_home = str(hc.chat_id)
+        if existing_home:
+            return "Home channel is already set and cannot be changed."
 
         # Save to .env so it persists across restarts
         try:
