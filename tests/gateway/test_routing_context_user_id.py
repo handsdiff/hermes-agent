@@ -98,11 +98,15 @@ class TestRoutingContextUserId:
         runner = _make_runner()
         assert GatewayRunner._build_routing_context(runner, None) == {}
 
-    def test_user_id_route_fires_end_to_end(self):
+    def test_user_id_route_fires_end_to_end(self, monkeypatch):
         """Integration: a Discord group message from the owner's user_id
         matches a ``user_id`` route even though ``source_kind`` is stranger."""
         from agent.smart_model_routing import apply_route
         from gateway.run import GatewayRunner
+
+        monkeypatch.delenv("DISCORD_OWNER_USER_ID", raising=False)
+        monkeypatch.delenv("DISCORD_OWNER_USER_IDS", raising=False)
+        monkeypatch.delenv("GATEWAY_OWNER_USER_IDS", raising=False)
 
         runner = _make_runner()
         src = _src("discord", user_id="1417636184355766305", chat_type="group")
