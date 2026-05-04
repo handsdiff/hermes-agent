@@ -19,6 +19,7 @@ import gateway.run as gateway_run
 from gateway.config import GatewayConfig, HomeChannel, Platform, PlatformConfig
 from gateway.platforms.base import MessageEvent, MessageType
 from gateway.session import SessionSource
+from hermes_cli.config import get_env_path
 
 
 def _make_runner(config=None):
@@ -55,7 +56,7 @@ def test_sethome_succeeds_when_no_home_is_set(monkeypatch, tmp_path):
     assert "✅" in result
     assert "Alice DM" in result
     assert os.environ.get("TELEGRAM_HOME_CHANNEL") == "123456"
-    assert (tmp_path / "config.yaml").exists()
+    assert "TELEGRAM_HOME_CHANNEL=123456" in get_env_path().read_text()
     monkeypatch.delenv("TELEGRAM_HOME_CHANNEL", raising=False)
 
 
