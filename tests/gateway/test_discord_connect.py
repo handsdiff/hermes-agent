@@ -524,6 +524,154 @@ async def test_safe_sync_slash_commands_recreates_metadata_only_diffs():
 
 
 @pytest.mark.asyncio
+async def test_safe_sync_slash_commands_recreates_when_delete_races_with_discord():
+    adapter = DiscordAdapter(PlatformConfig(enabled=True, token="test-token"))
+
+    class _UnknownApplicationCommand(Exception):
+        code = 10063
+
+    class _DesiredCommand:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def to_dict(self, tree):
+            return dict(self._payload)
+
+    class _ExistingCommand:
+        def __init__(self, command_id, payload):
+            self.id = command_id
+            self.name = payload["name"]
+            self.type = SimpleNamespace(value=payload["type"])
+            self._payload = payload
+
+        def to_dict(self):
+            return {
+                "id": self.id,
+                "application_id": 999,
+                **self._payload,
+                "name_localizations": {},
+                "description_localizations": {},
+            }
+
+    desired = {
+        "name": "help",
+        "description": "Show available commands",
+        "type": 1,
+        "options": [],
+        "nsfw": False,
+        "dm_permission": True,
+        "default_member_permissions": "8",
+    }
+    existing = _ExistingCommand(
+        12,
+        {
+            **desired,
+            "default_member_permissions": None,
+        },
+    )
+
+    fake_tree = SimpleNamespace(
+        get_commands=lambda: [_DesiredCommand(desired)],
+        fetch_commands=AsyncMock(return_value=[existing]),
+    )
+    fake_http = SimpleNamespace(
+        upsert_global_command=AsyncMock(),
+        edit_global_command=AsyncMock(),
+        delete_global_command=AsyncMock(
+            side_effect=_UnknownApplicationCommand("404 Unknown application command")
+        ),
+    )
+    adapter._client = SimpleNamespace(
+        tree=fake_tree,
+        http=fake_http,
+        application_id=999,
+        user=SimpleNamespace(id=999),
+    )
+
+    summary = await adapter._safe_sync_slash_commands()
+
+    assert summary == {
+        "total": 1,
+        "unchanged": 0,
+        "updated": 0,
+        "recreated": 1,
+        "created": 0,
+        "deleted": 0,
+    }
+    fake_http.delete_global_command.assert_awaited_once_with(999, 12)
+    fake_http.upsert_global_command.assert_awaited_once_with(999, desired)
+
+
+@pytest.mark.asyncio
+async def test_safe_sync_slash_commands_ignores_stale_orphan_delete():
+    adapter = DiscordAdapter(PlatformConfig(enabled=True, token="test-token"))
+
+    class _UnknownApplicationCommand(Exception):
+        code = 10063
+
+    class _ExistingCommand:
+        def __init__(self, command_id, payload):
+            self.id = command_id
+            self.name = payload["name"]
+            self.type = SimpleNamespace(value=payload["type"])
+            self._payload = payload
+
+        def to_dict(self):
+            return {
+                "id": self.id,
+                "application_id": 999,
+                **self._payload,
+                "name_localizations": {},
+                "description_localizations": {},
+            }
+
+    existing = _ExistingCommand(
+        13,
+        {
+            "name": "old-command",
+            "description": "To be deleted",
+            "type": 1,
+            "options": [],
+            "nsfw": False,
+            "dm_permission": True,
+            "default_member_permissions": None,
+        },
+    )
+
+    fake_tree = SimpleNamespace(
+        get_commands=lambda: [],
+        fetch_commands=AsyncMock(return_value=[existing]),
+    )
+    fake_http = SimpleNamespace(
+        upsert_global_command=AsyncMock(),
+        edit_global_command=AsyncMock(),
+        delete_global_command=AsyncMock(
+            side_effect=_UnknownApplicationCommand("404 Unknown application command")
+        ),
+    )
+    adapter._client = SimpleNamespace(
+        tree=fake_tree,
+        http=fake_http,
+        application_id=999,
+        user=SimpleNamespace(id=999),
+    )
+
+    summary = await adapter._safe_sync_slash_commands()
+
+    assert summary == {
+        "total": 0,
+        "unchanged": 0,
+        "updated": 0,
+        "recreated": 0,
+        "created": 0,
+        "deleted": 1,
+    }
+    fake_http.delete_global_command.assert_awaited_once_with(999, 13)
+    fake_http.upsert_global_command.assert_not_awaited()
+    fake_http.edit_global_command.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_post_connect_initialization_skips_sync_when_policy_off(monkeypatch):
     adapter = DiscordAdapter(PlatformConfig(enabled=True, token="test-token"))
     monkeypatch.setenv("DISCORD_COMMAND_SYNC_POLICY", "off")

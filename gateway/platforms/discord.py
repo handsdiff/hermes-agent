@@ -961,6 +961,27 @@ class DiscordAdapter(BasePlatformAdapter):
             "options": canonical["options"],
         }
 
+    @staticmethod
+    def _is_unknown_application_command_error(error: Exception) -> bool:
+        """Return True for Discord's stale-command delete race."""
+        code = getattr(error, "code", None)
+        return code == 10063 or "Unknown application command" in str(error)
+
+    async def _delete_global_command_if_present(
+        self, http: Any, app_id: int, command_id: int
+    ) -> None:
+        try:
+            await http.delete_global_command(app_id, command_id)
+        except Exception as e:
+            if self._is_unknown_application_command_error(e):
+                logger.info(
+                    "[%s] Discord command %s disappeared during slash command sync",
+                    self.name,
+                    command_id,
+                )
+                return
+            raise
+
     async def _safe_sync_slash_commands(self) -> Dict[str, int]:
         """Diff existing global commands and only mutate the commands that changed."""
         if not self._client:
@@ -1014,7 +1035,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 continue
 
             if self._patchable_app_command_payload(current_existing_payload) == self._patchable_app_command_payload(desired):
-                await http.delete_global_command(app_id, current.id)
+                await self._delete_global_command_if_present(http, app_id, current.id)
                 await http.upsert_global_command(app_id, desired)
                 recreated += 1
                 continue
@@ -1023,7 +1044,7 @@ class DiscordAdapter(BasePlatformAdapter):
             updated += 1
 
         for current in existing_by_key.values():
-            await http.delete_global_command(app_id, current.id)
+            await self._delete_global_command_if_present(http, app_id, current.id)
             deleted += 1
 
         return {
