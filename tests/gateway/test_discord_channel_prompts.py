@@ -102,6 +102,10 @@ def _make_runner():
         get_or_create_session=lambda source: SimpleNamespace(session_id="session-1"),
         load_transcript=lambda session_id: [],
     )
+    async def _run_inline(func, *args):
+        return func(*args)
+
+    runner._run_in_executor_with_context = _run_inline
     runner._get_or_create_gateway_honcho = lambda session_key: (None, None)
     runner._enrich_message_with_vision = AsyncMock(return_value="ENRICHED")
     return runner
