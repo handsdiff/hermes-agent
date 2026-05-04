@@ -504,12 +504,14 @@ class TestRunOnMCPLoopInterrupts:
         from tools.interrupt import set_interrupt
 
         loop = asyncio.new_event_loop()
-        thread = threading.Thread(target=loop.run_forever, daemon=True)
+        thread = threading.Thread(target=mcp_mod._run_mcp_loop, args=(loop,), daemon=True)
         thread.start()
 
+        started = threading.Event()
         cancelled = threading.Event()
 
         async def _slow_call():
+            started.set()
             try:
                 await asyncio.sleep(5)
                 return "done"
@@ -525,6 +527,7 @@ class TestRunOnMCPLoopInterrupts:
         waiter_tid = threading.current_thread().ident
 
         def _interrupt_soon():
+            started.wait(timeout=2)
             time.sleep(0.2)
             set_interrupt(True, waiter_tid)
 

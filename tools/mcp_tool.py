@@ -816,9 +816,15 @@ class SamplingHandler:
                 timeout=self.timeout,
             )
 
+        executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix=f"mcp-sampling-{self.server_name}",
+        )
         try:
+            loop = asyncio.get_running_loop()
             response = await asyncio.wait_for(
-                asyncio.to_thread(_sync_call), timeout=self.timeout,
+                loop.run_in_executor(executor, _sync_call),
+                timeout=self.timeout,
             )
         except asyncio.TimeoutError:
             self.metrics["errors"] += 1
@@ -831,6 +837,8 @@ class SamplingHandler:
             return self._error(
                 f"Sampling LLM call failed: {_sanitize_error(str(exc))}"
             )
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
 
         # Guard against empty choices (content filtering, provider errors)
         if not getattr(response, "choices", None):
@@ -1896,6 +1904,26 @@ def _mcp_loop_exception_handler(loop, context):
     loop.default_exception_handler(context)
 
 
+def _run_mcp_loop(loop: asyncio.AbstractEventLoop):
+    """Run the MCP event loop with a periodic wakeup for cross-thread work.
+
+    Some Python/runtime combinations can leave an idle selector loop asleep
+    after ``call_soon_threadsafe()``. A cheap timer keeps submissions,
+    cancellations, and stop requests from waiting on an indefinite select.
+    """
+    asyncio.set_event_loop(loop)
+
+    def _tick():
+        if not loop.is_closed():
+            loop.call_later(0.1, _tick)
+
+    loop.call_soon(_tick)
+    try:
+        loop.run_forever()
+    finally:
+        asyncio.set_event_loop(None)
+
+
 def _ensure_mcp_loop():
     """Start the background event loop thread if not already running."""
     global _mcp_loop, _mcp_thread
@@ -1905,7 +1933,8 @@ def _ensure_mcp_loop():
         _mcp_loop = asyncio.new_event_loop()
         _mcp_loop.set_exception_handler(_mcp_loop_exception_handler)
         _mcp_thread = threading.Thread(
-            target=_mcp_loop.run_forever,
+            target=_run_mcp_loop,
+            args=(_mcp_loop,),
             name="mcp-event-loop",
             daemon=True,
         )
@@ -1930,6 +1959,10 @@ def _run_on_mcp_loop(coro, timeout: float = 30):
     while True:
         if is_interrupted():
             future.cancel()
+            try:
+                future.result(timeout=1)
+            except (concurrent.futures.CancelledError, concurrent.futures.TimeoutError):
+                pass
             raise InterruptedError("User sent a new message")
 
         wait_timeout = 0.1
