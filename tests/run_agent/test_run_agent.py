@@ -22,6 +22,7 @@ import run_agent
 from run_agent import AIAgent
 from agent.error_classifier import FailoverReason
 from agent.prompt_builder import DEFAULT_AGENT_IDENTITY
+from hermes_constants import get_hermes_home
 
 
 # ---------------------------------------------------------------------------
@@ -99,7 +100,7 @@ def test_aiagent_reuses_existing_errors_log_handler():
     """Repeated AIAgent init should not accumulate duplicate errors.log handlers."""
     root_logger = logging.getLogger()
     original_handlers = list(root_logger.handlers)
-    error_log_path = (run_agent._hermes_home / "logs" / "errors.log").resolve()
+    error_log_path = (get_hermes_home() / "logs" / "errors.log").resolve()
 
     try:
         for handler in list(root_logger.handlers):
