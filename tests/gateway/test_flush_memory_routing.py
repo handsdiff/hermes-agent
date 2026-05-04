@@ -111,17 +111,27 @@ class TestFlushSourceRecovery:
         _, kwargs = runner._resolve_session_agent_runtime.call_args
         assert kwargs.get("source") is None
 
-    def test_async_wrapper_forwards_source(self, monkeypatch):
+    @pytest.mark.asyncio
+    async def test_async_wrapper_forwards_source(self, monkeypatch):
         import asyncio
 
         runner = _make_runner()
         runner._flush_memories_for_session = MagicMock()
 
+        real_loop = asyncio.get_running_loop()
+
+        class _InlineExecutorLoop:
+            def run_in_executor(self, _executor, func, *args):
+                func(*args)
+                future = real_loop.create_future()
+                future.set_result(None)
+                return future
+
+        monkeypatch.setattr(asyncio, "get_running_loop", lambda: _InlineExecutorLoop())
+
         entry_source = MagicMock(name="entry_source")
-        asyncio.run(
-            runner._async_flush_memories(
-                "session_abc", "agent:main:telegram:dm:123", entry_source
-            )
+        await runner._async_flush_memories(
+            "session_abc", "agent:main:telegram:dm:123", entry_source
         )
         # ``run_in_executor`` passes positional args; verify all three made it through.
         _args, _ = runner._flush_memories_for_session.call_args
